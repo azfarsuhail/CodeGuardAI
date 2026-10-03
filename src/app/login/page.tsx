@@ -11,9 +11,10 @@ export default async function LoginPage({ searchParams }: PageProps<"/login">) {
   const next = safeNext(typeof params.next === "string" ? params.next : null);
   if (await getViewer()) redirect(next);
   const error = typeof params.error === "string" ? params.error.slice(0, 200) : null;
+  const message = params.reset === "success" ? "Your password was updated. Sign in with your new password." : null;
   return (
     <main className="mx-auto flex max-w-5xl px-4 pt-12 pb-16 sm:px-6">
-      <LoginForm next={next} initialError={error} />
+      <LoginForm next={next} initialError={error} initialMessage={message} />
     </main>
   );
 }

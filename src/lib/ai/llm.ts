@@ -26,18 +26,19 @@ const PER_CALL_TIMEOUT_MS = 30_000;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // Privacy-first cascade (PRD 18): only providers whose terms exclude training on submitted code.
-//   1. OpenRouter, paid Nemotron, routed exclusively to zero-data-retention endpoints (enforced per request).
-//   2. Groq (API data is not used for training).
+//   1. Groq: API data is not used for training; ~7 s per review, inside the 30 s target (PRD 9).
+//   2. OpenRouter, paid Nemotron, routed exclusively to zero-data-retention endpoints (enforced per request).
+//      Its only ZDR endpoint is often rate-limited upstream, which is why it is the fallback, not the primary.
 // No Gemini and no free-tier models: their terms allow training on prompts. If both fail, the review
 // degrades to static-analysis results, so code never goes anywhere else.
 export const OPENROUTER_DEFAULT_MODEL = "nvidia/nemotron-3-super-120b-a12b";
 
 function providers(): Provider[] {
   const list: Provider[] = [];
+  if (process.env.GROQ_API_KEY) list.push({ name: "groq", model: process.env.GROQ_MODEL || "openai/gpt-oss-120b", call: callGroq });
   const orModel = process.env.OPENROUTER_MODEL || OPENROUTER_DEFAULT_MODEL;
   // Free routes may train on prompts; refuse them outright rather than rely on ZDR routing to 404.
   if (process.env.OPENROUTER_API_KEY && !orModel.endsWith(":free")) list.push({ name: "openrouter", model: orModel, call: callOpenRouter });
-  if (process.env.GROQ_API_KEY) list.push({ name: "groq", model: process.env.GROQ_MODEL || "openai/gpt-oss-120b", call: callGroq });
   return list;
 }
 

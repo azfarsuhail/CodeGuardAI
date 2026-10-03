@@ -36,56 +36,66 @@ afterEach(() => {
 
 const run = () => generateStructured({ system: "s", user: "u", schema, jsonSchema, deadlineMs: 10_000 });
 
-test("OpenRouter paid Nemotron is primary, with zero data retention always enforced", async () => {
-  mockFetch({ "openrouter.ai": [reply('```json\n{"answer":"ok"}\n```')] });
-  assert.deepEqual(await run(), { data: { answer: "ok" }, model: "openrouter:nvidia/nemotron-3-super-120b-a12b" });
-  assert.deepEqual(bodies[0].provider, { zdr: true, data_collection: "deny", require_parameters: true });
-  assert.equal((bodies[0].response_format as { type: string }).type, "json_schema");
+test("Groq is primary", async () => {
+  mockFetch({ "api.groq.com": [reply('```json\n{"answer":"ok"}\n```')] });
+  assert.deepEqual(await run(), { data: { answer: "ok" }, model: "groq:openai/gpt-oss-120b" });
+  assert.deepEqual(calls, ["api.groq.com"]);
 });
 
-test("Groq is the only fallback; Gemini is never called even with a key set", async () => {
+test("OpenRouter is the only fallback, with zero data retention always enforced", async () => {
+  mockFetch({
+    "api.groq.com": [() => new Response("Invalid API Key", { status: 401 })],
+    "openrouter.ai": [reply("{\"answer\":\"or\"}")],
+  });
+  assert.deepEqual(await run(), { data: { answer: "or" }, model: "openrouter:nvidia/nemotron-3-super-120b-a12b" });
+  assert.deepEqual(calls, ["api.groq.com", "openrouter.ai"]);
+  assert.deepEqual(bodies[1].provider, { zdr: true, data_collection: "deny", require_parameters: true });
+  assert.equal((bodies[1].response_format as { type: string }).type, "json_schema");
+});
+
+test("Gemini is never called, even with a key set; both down raises LlmUnavailableError", async () => {
   process.env.GEMINI_API_KEY = "still-set";
   mockFetch({
-    "openrouter.ai": [() => new Response('{"error":{"message":"No endpoints found matching your data policy"}}', { status: 404 })],
     "api.groq.com": [() => new Response("Invalid API Key", { status: 401 })],
+    "openrouter.ai": [() => new Response("{\"error\":{\"message\":\"No endpoints found matching your data policy\"}}", { status: 404 })],
   });
   await assert.rejects(run(), LlmUnavailableError);
-  assert.deepEqual(calls, ["openrouter.ai", "api.groq.com"]);
+  assert.deepEqual(calls, ["api.groq.com", "openrouter.ai"]);
 });
 
 test("free OpenRouter models are refused (their routes may train on prompts)", async () => {
   process.env.OPENROUTER_MODEL = "nvidia/nemotron-3-super-120b-a12b:free";
-  mockFetch({ "api.groq.com": [reply('{"answer":"groq"}')] });
-  assert.equal((await run()).model, "groq:openai/gpt-oss-120b");
+  mockFetch({ "api.groq.com": [() => new Response("Invalid API Key", { status: 401 })] });
+  await assert.rejects(run(), LlmUnavailableError);
   assert.deepEqual(calls, ["api.groq.com"]);
 });
 
-test("upstream error inside a 200 body falls through to Groq", async () => {
+test("upstream error inside a 200 body falls through to the next provider", async () => {
   mockFetch({
-    "openrouter.ai": [() => Response.json({ error: { code: 400, message: "Provider returned error" } })],
-    "api.groq.com": [reply('{"answer":"groq"}')],
+    "api.groq.com": [() => Response.json({ error: { code: 400, message: "Provider returned error" } })],
+    "openrouter.ai": [reply("{\"answer\":\"or\"}")],
   });
-  assert.equal((await run()).data.answer, "groq");
+  assert.equal((await run()).data.answer, "or");
 });
 
 test("retries once on schema violation, then falls back", async () => {
   mockFetch({
-    "openrouter.ai": [reply('{"answer":"too long"}'), reply("not json")],
-    "api.groq.com": [reply('{"answer":"groq"}')],
+    "api.groq.com": [reply("{\"answer\":\"too long\"}"), reply("not json")],
+    "openrouter.ai": [reply("{\"answer\":\"or\"}")],
   });
-  assert.equal((await run()).data.answer, "groq");
-  assert.deepEqual(calls, ["openrouter.ai", "openrouter.ai", "api.groq.com"]);
+  assert.equal((await run()).data.answer, "or");
+  assert.deepEqual(calls, ["api.groq.com", "api.groq.com", "openrouter.ai"]);
   assert.match(JSON.stringify(bodies[1].messages), /previous response was rejected/);
 });
 
 test("a transient 503 gets one back-off retry on the same model", async () => {
-  mockFetch({ "openrouter.ai": [() => new Response("busy", { status: 503 }), reply('{"answer":"ok"}')] });
+  mockFetch({ "api.groq.com": [() => new Response("busy", { status: 503 }), reply("{\"answer\":\"ok\"}")] });
   assert.equal((await run()).data.answer, "ok");
-  assert.deepEqual(calls, ["openrouter.ai", "openrouter.ai"]);
+  assert.deepEqual(calls, ["api.groq.com", "api.groq.com"]);
 });
 
 test("a 429 waits for the provider's Retry-After before retrying", async () => {
-  mockFetch({ "openrouter.ai": [() => new Response("slow down", { status: 429, headers: { "retry-after": "1" } }), reply('{"answer":"ok"}')] });
+  mockFetch({ "api.groq.com": [() => new Response("slow down", { status: 429, headers: { "retry-after": "1" } }), reply("{\"answer\":\"ok\"}")] });
   const started = Date.now();
   assert.equal((await run()).data.answer, "ok");
   assert.ok(Date.now() - started >= 950, "should wait ~1 s");
@@ -93,11 +103,11 @@ test("a 429 waits for the provider's Retry-After before retrying", async () => {
 
 test("a network failure also gets one back-off retry", async () => {
   mockFetch({
-    "openrouter.ai": [
+    "api.groq.com": [
       () => {
         throw new TypeError("fetch failed");
       },
-      reply('{"answer":"ok"}'),
+      reply("{\"answer\":\"ok\"}"),
     ],
   });
   assert.equal((await run()).data.answer, "ok");

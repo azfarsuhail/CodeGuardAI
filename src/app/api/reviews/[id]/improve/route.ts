@@ -3,7 +3,8 @@ import { apiError } from "@/lib/http";
 import { createImproveVersion, ReviewActionError } from "@/lib/reviews";
 import { getViewer } from "@/lib/supabase/server";
 
-// The rewrite is one synchronous LLM call (30 s cap per provider attempt) plus re-validation.
+// The rewrite is one synchronous LLM call (75 s budget, 30 s cap per provider attempt) plus re-validation.
+// 90 s is within every Vercel plan's limit with Fluid Compute (Hobby: 300 s).
 export const maxDuration = 90;
 
 // POST /api/reviews/{id}/improve (PRD 15, FR-050): full AI rewrite + structured change list, saved as a new version.

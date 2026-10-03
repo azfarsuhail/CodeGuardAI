@@ -12,7 +12,8 @@
     "db:push": "prisma db push && prisma db execute --file prisma/rls.sql",
     "db:migrate": "prisma migrate dev",
     "db:rls": "prisma db execute --file prisma/rls.sql",
-    "test:e2e": "node --env-file=.env --no-warnings scripts/test-e2e.ts"
+    "test:e2e": "node --env-file=.env --no-warnings scripts/test-e2e.ts",
+    "typecheck": "next typegen && tsc --noEmit"
   },
   "dependencies": {
     "@astral-sh/ruff-wasm-nodejs": "^0.16.10",

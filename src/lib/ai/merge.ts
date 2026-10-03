@@ -70,6 +70,33 @@ export function absorbEchoedContext(lines: string[], loc: { start: number; end: 
 }
 
 /**
+ * A fix that also (re)defines a function living outside its range would leave two definitions behind (seen live:
+ * a "docstrings" fix for one function carried a rewritten copy of the next). If that function sits right next to
+ * the range (only blank lines between), the fix means to replace it too, so extend the range. If it isn't
+ * adjacent, report a conflict so the fix can't be bulk-applied.
+ */
+export function absorbRedefinedFunctions(lines: string[], loc: { start: number; end: number }, fixCode: string, functions: StaticFunctionMetric[]) {
+  const defined = new Set([...fixCode.matchAll(/^\s*(?:export\s+)?(?:async\s+)?(?:def|function|class)\s+([A-Za-z_$][\w$]*)/gm)].map((m) => m[1]));
+  const blank = (from: number, to: number) => lines.slice(from - 1, to).every((l) => !l.trim()); // 1-based, inclusive
+  let { start, end } = loc;
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const f of functions) {
+      if (!defined.has(f.name) || (f.start_line >= start && f.end_line <= end)) continue;
+      if (f.start_line > end && blank(end + 1, f.start_line - 1)) {
+        end = f.end_line;
+        grew = true;
+      } else if (f.end_line < start && blank(f.end_line + 1, start - 1)) {
+        start = f.start_line;
+        grew = true;
+      }
+    }
+  }
+  const conflict = functions.some((f) => defined.has(f.name) && (f.start_line < start || f.end_line > end));
+  return { start, end, conflict };
+}
+
+/**
  * Models sometimes return fix_code without the surrounding indentation (a guard inside a function at column 0),
  * which breaks indentation-sensitive code. Shift an under-indented fix to the indentation of the line it replaces.
  */
@@ -193,10 +220,16 @@ export function mergeFindings(args: {
     if (ref) used.add(ref.id);
     const cwe = normalizeCwe(a.cwe) ?? ref?.cwe ?? null;
     let fixCode = a.fix_code?.trim() ? a.fix_code : null;
+    let redefinitionConflict = false;
     if (fixCode && !ref) loc = absorbEchoedContext(lines, loc, fixCode);
-    if (fixCode) fixCode = reindentFix(lines, loc, fixCode);
+    if (fixCode) {
+      const r = absorbRedefinedFunctions(lines, loc, fixCode, args.functions ?? []);
+      loc = { start: r.start, end: r.end };
+      redefinitionConflict = r.conflict;
+      fixCode = reindentFix(lines, loc, fixCode);
+    }
     let safety = atLeast(a.fix_safety, a.category);
-    if (safety === "safe" && fixCode && orphansNextLine(lines, loc, fixCode)) safety = "needs_review";
+    if (safety === "safe" && fixCode && (redefinitionConflict || orphansNextLine(lines, loc, fixCode))) safety = "needs_review";
     merged.push({
       category: a.category,
       severity: a.severity,

@@ -8,7 +8,8 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { createClient } from "@/lib/supabase/client";
 
-// Reached from the password-reset email via /auth/callback, which has already signed the user in.
+// FR-002 password reset, step 2. /auth/callback has already turned the emailed link into a short-lived
+// recovery session; set the new password, end that session, and send the user to sign in with it.
 export default function ResetPasswordPage() {
   const router = useRouter();
   const [password, setPassword] = useState("");
@@ -19,17 +20,20 @@ export default function ResetPasswordPage() {
     e.preventDefault();
     setBusy(true);
     setError(null);
-    const { error } = await createClient().auth.updateUser({ password });
+    const supabase = createClient();
+    const { error } = await supabase.auth.updateUser({ password });
     if (error) {
       setError(
-        error.message.toLowerCase().includes("session")
-          ? "This reset link has expired. Request a new one from the sign-in page."
+        /session|jwt|not authenticated/i.test(error.message)
+          ? "This reset link has expired or was opened in a different browser. Request a new one."
           : error.message,
       );
       setBusy(false);
       return;
     }
-    router.replace("/history");
+    // Sign out everywhere so a stolen recovery session or old device can't keep using the account.
+    await supabase.auth.signOut({ scope: "global" });
+    router.replace("/login?reset=success");
     router.refresh();
   }
 
@@ -51,7 +55,7 @@ export default function ResetPasswordPage() {
             className="h-11 w-full rounded-lg border border-input bg-card px-3 text-[15px] outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/40"
           />
           <p id="new-password-hint" className="text-sm text-muted-foreground">
-            At least 8 characters.
+            At least 8 characters. You&apos;ll be signed out everywhere and asked to sign in with it.
           </p>
         </div>
         <Button type="submit" disabled={busy} aria-busy={busy} className="h-11 text-[15px] font-bold">
@@ -61,8 +65,8 @@ export default function ResetPasswordPage() {
         {error && (
           <p role="alert" className="rounded-xl border border-[#fda29b] bg-[#fef3f2] px-4 py-3 text-sm font-bold text-[#912018]">
             {error}{" "}
-            <Link href="/login" className="underline underline-offset-4">
-              Back to sign in
+            <Link href="/forgot-password" className="underline underline-offset-4">
+              Send a new link
             </Link>
           </p>
         )}

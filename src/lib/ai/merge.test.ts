@@ -3,7 +3,16 @@ import assert from "node:assert/strict";
 import { runStaticAnalysis } from "../analysis/index.ts";
 import { LANGUAGES } from "../languages.ts";
 import { AiReviewOutput, type AiFinding } from "../schemas.ts";
-import { absorbEchoedContext, clampToFunction, mergeFindings, mergeMetrics, orphansNextLine, reindentFix, verifyLocation } from "./merge.ts";
+import {
+  absorbEchoedContext,
+  absorbRedefinedFunctions,
+  clampToFunction,
+  mergeFindings,
+  mergeMetrics,
+  orphansNextLine,
+  reindentFix,
+  verifyLocation,
+} from "./merge.ts";
 import { buildReviewPrompt } from "./prompt.ts";
 
 const code = LANGUAGES.python.sample;
@@ -76,6 +85,24 @@ test("fix code that echoes the lines around its range absorbs them instead of du
     ai: output([ai({ fix_code: echo })]),
   });
   assert.deepEqual([f.location.start_line, f.location.end_line], [10, 13]);
+});
+
+test("a fix that rewrites the adjacent function absorbs it instead of duplicating it", () => {
+  // The live case: a "docstrings" fix for one function also carried a rewritten copy of the next one.
+  const src = 'def find(items):\n    return items\n\ndef count(conn):\n    return conn.n\n\ndef other():\n    pass\n';
+  const srcLines = src.split("\n");
+  const fns = [
+    { name: "find", start_line: 1, end_line: 2, cyclomatic: 1, nesting_depth: 0 },
+    { name: "count", start_line: 4, end_line: 5, cyclomatic: 1, nesting_depth: 0 },
+    { name: "other", start_line: 7, end_line: 8, cyclomatic: 1, nesting_depth: 0 },
+  ];
+  const fix = 'def find(items):\n    """Doc."""\n    return items\n\n\ndef count(conn):\n    """Doc."""\n    return conn.n';
+  assert.deepEqual(absorbRedefinedFunctions(srcLines, { start: 1, end: 2 }, fix, fns), { start: 1, end: 5, conflict: false });
+  // Not adjacent (another function in between): can't safely extend, so it's a conflict.
+  const far = 'def find(items):\n    """Doc."""\n    return items\n\ndef other():\n    pass';
+  assert.equal(absorbRedefinedFunctions(srcLines, { start: 1, end: 2 }, far, fns).conflict, true);
+  // A fix that only touches its own function is untouched.
+  assert.deepEqual(absorbRedefinedFunctions(srcLines, { start: 1, end: 2 }, 'def find(items):\n    return list(items)', fns), { start: 1, end: 2, conflict: false });
 });
 
 test("an under-indented fix is shifted to the indentation of the code it replaces", () => {

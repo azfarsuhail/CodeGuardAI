@@ -1,18 +1,18 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { createClient } from "@/lib/supabase/client";
 
-type Mode = "sign-in" | "sign-up" | "reset";
+type Mode = "sign-in" | "sign-up";
 
 const COPY: Record<Mode, { title: string; submit: string; busy: string }> = {
   "sign-in": { title: "Sign in", submit: "Sign in", busy: "Signing in…" },
   "sign-up": { title: "Create an account", submit: "Create account", busy: "Creating account…" },
-  reset: { title: "Reset your password", submit: "Send reset link", busy: "Sending…" },
 };
 
 const input =
@@ -26,14 +26,14 @@ function GitHubMark() {
   );
 }
 
-export function LoginForm({ next, initialError }: { next: string; initialError: string | null }) {
+export function LoginForm({ next, initialError, initialMessage }: { next: string; initialError: string | null; initialMessage: string | null }) {
   const router = useRouter();
   const [mode, setMode] = useState<Mode>("sign-in");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(initialError);
-  const [message, setMessage] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(initialMessage);
   const callback = (dest: string) => `${window.location.origin}/auth/callback?next=${encodeURIComponent(dest)}`;
 
   function switchMode(m: Mode) {
@@ -66,10 +66,6 @@ export function LoginForm({ next, initialError }: { next: string; initialError: 
         }
         // FR-002: email verification. The link lands on /auth/callback, which signs the user in.
         setMessage(`Check ${email} for a link to confirm your account, then come back here.`);
-      } else {
-        const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo: callback("/auth/reset") });
-        if (error) throw error;
-        setMessage(`If an account exists for ${email}, a password reset link is on its way.`);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong. Try again.");
@@ -92,31 +88,26 @@ export function LoginForm({ next, initialError }: { next: string; initialError: 
     <div className="flex w-full max-w-md flex-col gap-6">
       <h1 className="font-display text-4xl font-bold tracking-[-0.02em] [font-stretch:88%]">{COPY[mode].title}</h1>
 
-      {mode !== "reset" && (
-        <>
-          <Button type="button" variant="outline" onClick={github} disabled={busy} className="h-11 bg-card text-[15px] font-bold">
-            <GitHubMark />
-            Continue with GitHub
-          </Button>
-          <p className="flex items-center gap-3 text-sm text-muted-foreground before:h-px before:flex-1 before:bg-border after:h-px after:flex-1 after:bg-border">
-            or with email
-          </p>
-        </>
-      )}
+      <Button type="button" variant="outline" onClick={github} disabled={busy} className="h-11 bg-card text-[15px] font-bold">
+        <GitHubMark />
+        Continue with GitHub
+      </Button>
+      <p className="flex items-center gap-3 text-sm text-muted-foreground before:h-px before:flex-1 before:bg-border after:h-px after:flex-1 after:bg-border">
+        or with email
+      </p>
 
       <form onSubmit={submit} className="flex flex-col gap-4">
         <div className="flex flex-col gap-2">
           <Label htmlFor="email">Email</Label>
           <input id="email" type="email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} className={input} />
         </div>
-        {mode !== "reset" && (
-          <div className="flex flex-col gap-2">
+        <div className="flex flex-col gap-2">
             <div className="flex items-baseline justify-between">
               <Label htmlFor="password">Password</Label>
               {mode === "sign-in" && (
-                <button type="button" onClick={() => switchMode("reset")} className="text-sm font-bold text-primary underline-offset-4 hover:underline">
+                <Link href="/forgot-password" className="text-sm font-bold text-primary underline-offset-4 hover:underline">
                   Forgot password?
-                </button>
+                </Link>
               )}
             </div>
             <input
@@ -136,7 +127,6 @@ export function LoginForm({ next, initialError }: { next: string; initialError: 
               </p>
             )}
           </div>
-        )}
         <Button type="submit" disabled={busy} aria-busy={busy} className="h-11 text-[15px] font-bold">
           {busy && <Loader2 aria-hidden className="animate-spin motion-reduce:animate-none" />}
           {busy ? COPY[mode].busy : COPY[mode].submit}
@@ -162,7 +152,7 @@ export function LoginForm({ next, initialError }: { next: string; initialError: 
           </>
         ) : (
           <>
-            {mode === "sign-up" ? "Already have an account?" : "Remembered it?"}{" "}
+            Already have an account?{" "}
             <button type="button" onClick={() => switchMode("sign-in")} className="font-bold text-primary underline-offset-4 hover:underline">
               Sign in
             </button>

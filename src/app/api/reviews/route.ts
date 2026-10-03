@@ -5,7 +5,9 @@ import { CreateReviewRequest } from "@/lib/schemas";
 import { getViewer } from "@/lib/supabase/server";
 
 // Static analysis + the AI call run in this Node.js function. The analyzers (ESLint, Ruff WebAssembly)
-// are too large for the Edge runtime, so this stays on Node (still on the free tier).
+// are too large for the Edge runtime, so this stays on Node. Work scheduled with after() counts toward this
+// limit: AI budget 75 s (AI_DEADLINE_MS) + merge and DB writes. 90 s is well inside every Vercel plan's limit
+// with Fluid Compute (Hobby: 300 s default and max), so no paid plan is needed.
 export const maxDuration = 90;
 
 // POST /api/reviews (PRD 15): validates, runs static analysis synchronously, stores a static-only report,

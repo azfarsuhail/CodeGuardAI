@@ -28,6 +28,9 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
                 <Link href="/history" className={navLink}>
                   History
                 </Link>
+                <Link href="/settings" className={navLink}>
+                  Settings
+                </Link>
                 {viewer.email && <span className="max-w-48 truncate text-muted-foreground">{viewer.email}</span>}
                 <form action="/auth/signout" method="post">
                   <button type="submit" className={navLink}>

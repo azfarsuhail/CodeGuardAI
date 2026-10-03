@@ -37,5 +37,17 @@ CREATE POLICY "Users read metrics of their own reviews" ON "Metrics"
   FOR SELECT TO authenticated
   USING (EXISTS (SELECT 1 FROM "Review" r WHERE r.id = "Metrics"."reviewId" AND r."userId" = (SELECT auth.uid())));
 
+-- FR-004 backstop: tie app profiles to Supabase auth users, so deleting an auth user anywhere (including the
+-- Supabase dashboard) also deletes the profile, which cascades to Review -> Finding / FixVersion / Metrics.
+-- Not in schema.prisma (Prisma can't reference the auth schema), so db push drops it and this re-adds it.
+-- NOT VALID: enforce for new rows without failing on any pre-existing orphaned profile.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'User_id_auth_users_fkey') THEN
+    ALTER TABLE "User" ADD CONSTRAINT "User_id_auth_users_fkey"
+      FOREIGN KEY (id) REFERENCES auth.users (id) ON DELETE CASCADE NOT VALID;
+  END IF;
+END $$;
+
 -- Make PostgREST pick up schema changes immediately.
 NOTIFY pgrst, 'reload schema';
