@@ -147,17 +147,32 @@ export const StudentReviewOutput = AiReviewOutput.superRefine((o, ctx) => {
 // LLM structured output: fix / improve pass (PRD 8.6).
 // ---------------------------------------------------------------------------
 
-export const FixChange = z.object({
-  finding_refs: z.array(z.string()).describe("Finding ids addressed by this change; empty for pure improvements"),
-  description: z.string().max(400),
+export const ImproveKind = z.enum([
+  "extract_function",
+  "rename",
+  "remove_redundancy",
+  "error_handling",
+  "simplify",
+  "performance",
+  "security",
+  "documentation",
+  "other",
+]);
+
+export const ImproveChange = z.object({
+  kind: ImproveKind,
+  description: z.string().max(400).describe("What changed and why, one or two sentences"),
+  finding_refs: z.array(z.string().max(20)).describe("Review finding ids this change addresses; empty for pure improvements"),
   safety: FixSafety,
   start_line: line.describe("First affected line in the ORIGINAL code"),
-  end_line: line,
+  end_line: line.describe("Last affected line in the ORIGINAL code"),
 });
 
-export const AiFixOutput = z.object({
-  code: z.string().max(LIMITS.maxBytes * 2).describe("The complete revised file"),
-  changes: z.array(FixChange).max(100),
+// FR-050 "Improve Code": a complete rewrite plus a structured change list.
+export const AiImproveOutput = z.object({
+  summary: z.string().max(600).describe("One or two sentences on what the rewrite improves"),
+  code: z.string().min(1).max(LIMITS.maxBytes * 2).describe("The complete improved file"),
+  changes: z.array(ImproveChange).min(1).max(60),
 });
 
 // ---------------------------------------------------------------------------
@@ -224,7 +239,9 @@ export const FixVersionDetail = z.object({
   id: z.string(),
   type: z.enum(["improve", "fix_safe"]),
   code: z.string(),
-  changes: z.array(AppliedChange),
+  changes: z.array(AppliedChange).describe("fix_safe versions: the findings applied"),
+  improvements: z.array(ImproveChange).describe("improve versions: the rewrite's change list"),
+  summary: z.string().nullable(),
   validated: z.boolean().describe("Parses and introduces no new static-analysis issues"),
   validation_errors: z.array(z.string()),
   created_at: z.string(),
@@ -282,8 +299,9 @@ export type AiFinding = z.infer<typeof AiFinding>;
 export type FunctionComplexity = z.infer<typeof FunctionComplexity>;
 export type ConceptPrimer = z.infer<typeof ConceptPrimer>;
 export type AiReviewOutput = z.infer<typeof AiReviewOutput>;
-export type FixChange = z.infer<typeof FixChange>;
-export type AiFixOutput = z.infer<typeof AiFixOutput>;
+export type ImproveKind = z.infer<typeof ImproveKind>;
+export type ImproveChange = z.infer<typeof ImproveChange>;
+export type AiImproveOutput = z.infer<typeof AiImproveOutput>;
 export type Finding = z.infer<typeof Finding>;
 export type ScoreReport = z.infer<typeof ScoreReport>;
 export type FunctionMetric = z.infer<typeof FunctionMetric>;
@@ -296,4 +314,4 @@ export type UpdateFindingRequest = z.infer<typeof UpdateFindingRequest>;
 
 // JSON Schemas handed to Gemini (responseJsonSchema) / Groq (response_format.json_schema).
 export const aiReviewJsonSchema = z.toJSONSchema(AiReviewOutput);
-export const aiFixJsonSchema = z.toJSONSchema(AiFixOutput);
+export const aiImproveJsonSchema = z.toJSONSchema(AiImproveOutput);

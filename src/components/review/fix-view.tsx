@@ -1,28 +1,15 @@
 "use client";
 
-import { useMemo, useState, useSyncExternalStore } from "react";
+import { useMemo, useState } from "react";
 import Link from "next/link";
-import { DiffEditor } from "@monaco-editor/react";
 import { ArrowLeft, Check, CircleCheck, Copy, Download, Loader2, Save, TriangleAlert, Wand2 } from "lucide-react";
-import { THEME, defineTheme } from "@/components/code-editor";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { mono } from "@/app/fonts";
 import { applyFixes, defaultSelection, isApplicable } from "@/lib/fixes";
 import { FixVersionDetail, type Finding, type FixSafety, type ReviewDetail } from "@/lib/schemas";
 import { cn } from "@/lib/utils";
 import { SAFETY, SafetyBadge, SeverityBadge } from "./badges";
-
-// Side-by-side needs room; below 768px Monaco's inline diff reads better.
-const wideQuery = "(min-width: 768px)";
-const subscribe = (cb: () => void) => {
-  const mq = window.matchMedia(wideQuery);
-  mq.addEventListener("change", cb);
-  return () => mq.removeEventListener("change", cb);
-};
-const useWide = () => useSyncExternalStore(subscribe, () => window.matchMedia(wideQuery).matches, () => true);
-
-const fixedFileName = (name: string) => (/\.[^.]+$/.test(name) ? name.replace(/(\.[^.]+)$/, ".fixed$1") : `${name}.fixed`);
+import { CodeDiff, downloadText, fixedFileName, useWide } from "./code-diff";
 
 export function FixView({ review }: { review: ReviewDetail }) {
   // The submitted code. Never written to: every fix produces a separate string (FR-051).
@@ -83,12 +70,7 @@ export function FixView({ review }: { review: ReviewDetail }) {
     }
   }
 
-  function download() {
-    const url = URL.createObjectURL(new Blob([plan.code], { type: "text/plain;charset=utf-8" }));
-    const a = Object.assign(document.createElement("a"), { href: url, download: fixedFileName(review.file_name) });
-    a.click();
-    URL.revokeObjectURL(url);
-  }
+  const download = () => downloadText(plan.code, fixedFileName(review.file_name, "fixed"));
 
   const item = (f: Finding, selectable: boolean) => {
     const reason = skippedById.get(f.id);
@@ -244,34 +226,7 @@ export function FixView({ review }: { review: ReviewDetail }) {
             </p>
           )}
 
-          <div className="h-[min(70vh,680px)] min-h-96 overflow-hidden rounded-2xl bg-sheet shadow-[0_28px_56px_-28px_rgb(22_32_43/0.55)]">
-            <DiffEditor
-              height="100%"
-              language={review.language}
-              original={original}
-              modified={plan.code}
-              theme={THEME}
-              beforeMount={defineTheme}
-              loading={<p className="p-4 text-sm text-sheet-muted">Loading diff…</p>}
-              options={{
-                readOnly: true,
-                originalEditable: false,
-                renderSideBySide: wide,
-                useInlineViewWhenSpaceIsLimited: false,
-                fontFamily: mono.style.fontFamily,
-                fontSize: 14,
-                lineHeight: 22,
-                minimap: { enabled: false },
-                scrollBeyondLastLine: false,
-                automaticLayout: true,
-                renderOverviewRuler: false,
-                padding: { top: 12, bottom: 12 },
-                accessibilitySupport: "auto",
-                ariaLabel: "Fixed version of the code",
-                originalAriaLabel: "Original code as submitted",
-              }}
-            />
-          </div>
+          <CodeDiff original={original} modified={plan.code} language={review.language} modifiedLabel="Fixed version of the code" />
 
           {plan.applied.length > 0 && (
             <details className="text-sm">

@@ -256,18 +256,12 @@ try {
     const tier2 = await aiReview(req, analysis, 45_000);
     await check(`OpenRouter rejected -> tier 2 Groq serves the review (${tier2.model ?? "none"})`, () => assert.match(tier2.model ?? "none", /^groq:/));
   }
-  if (real.gemini) {
-    process.env.OPENROUTER_API_KEY = BROKEN;
-    process.env.GROQ_API_KEY = BROKEN;
-    const tier3 = await aiReview(req, analysis, 45_000);
-    await check(`OpenRouter and Groq rejected -> tier 3 Gemini serves the review (${tier3.model ?? "none"})`, () =>
-      assert.match(tier3.model ?? "none", /^gemini:/),
-    );
-  }
-
-  for (const k of ["OPENROUTER_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY"]) if (process.env[k]) process.env[k] = BROKEN;
+  // Privacy (PRD 18): with both compliant providers down, code must NOT go to Gemini even if a key is set.
+  process.env.OPENROUTER_API_KEY = BROKEN;
+  process.env.GROQ_API_KEY = BROKEN;
+  process.env.GEMINI_API_KEY = real.gemini ?? "a-real-looking-key";
   const degraded = await aiReview(req, analysis, 20_000);
-  await check("both providers down -> static-only report with notice, still scored", () => {
+  await check("both compliant providers down -> static-only report (never Gemini), still scored", () => {
     assert.equal(degraded.model, null);
     assert.ok(degraded.notice);
     assert.ok(degraded.findings.length > 0 && degraded.findings.every((x) => x.source === "static"));

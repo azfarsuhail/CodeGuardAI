@@ -25,21 +25,19 @@ const MAX_OUTPUT_TOKENS = 8192;
 const PER_CALL_TIMEOUT_MS = 30_000;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// 3-tier cascade: OpenRouter -> Groq -> Gemini (Gemini overload falls back to its lite model).
-// Privacy (PRD 18): OpenRouter's :free routes and Gemini's free tier may train on prompts; Groq's API terms
-// don't. OPENROUTER_ZDR=true restricts OpenRouter to zero-retention, no-training endpoints (free models then
-// have none, so requests fall through to Groq).
+// Privacy-first cascade (PRD 18): only providers whose terms exclude training on submitted code.
+//   1. OpenRouter, paid Nemotron, routed exclusively to zero-data-retention endpoints (enforced per request).
+//   2. Groq (API data is not used for training).
+// No Gemini and no free-tier models: their terms allow training on prompts. If both fail, the review
+// degrades to static-analysis results, so code never goes anywhere else.
+export const OPENROUTER_DEFAULT_MODEL = "nvidia/nemotron-3-super-120b-a12b";
+
 function providers(): Provider[] {
   const list: Provider[] = [];
-  if (process.env.OPENROUTER_API_KEY)
-    list.push({ name: "openrouter", model: process.env.OPENROUTER_MODEL || "nvidia/nemotron-3-super-120b-a12b:free", call: callOpenRouter });
+  const orModel = process.env.OPENROUTER_MODEL || OPENROUTER_DEFAULT_MODEL;
+  // Free routes may train on prompts; refuse them outright rather than rely on ZDR routing to 404.
+  if (process.env.OPENROUTER_API_KEY && !orModel.endsWith(":free")) list.push({ name: "openrouter", model: orModel, call: callOpenRouter });
   if (process.env.GROQ_API_KEY) list.push({ name: "groq", model: process.env.GROQ_MODEL || "openai/gpt-oss-120b", call: callGroq });
-  if (process.env.GEMINI_API_KEY) {
-    const primary = process.env.GEMINI_MODEL || "gemini-3.6-flash";
-    const fallback = process.env.GEMINI_FALLBACK_MODEL || "gemini-3.5-flash-lite";
-    list.push({ name: "gemini", model: primary, call: callGemini });
-    if (fallback !== primary) list.push({ name: "gemini", model: fallback, call: callGemini });
-  }
   return list;
 }
 
@@ -96,42 +94,14 @@ const callOpenRouter: Call = (model, system, user, schema, signal) =>
       max_tokens: 2 * MAX_OUTPUT_TOKENS,
       messages: messages(system, user),
       response_format: { type: "json_schema", json_schema: { name: "codeguard_output", strict: true, schema } },
-      // Default reasoning on free reasoning models can run for minutes and eat the output budget.
-      // With require_parameters, a model that doesn't support `reasoning` has no endpoints: it 404s and the cascade moves on.
+      // Unbounded reasoning can run for minutes and eat the output budget.
       reasoning: { effort: "low", exclude: true },
-      provider: {
-        require_parameters: true, // only route to endpoints that actually honour response_format
-        ...(process.env.OPENROUTER_ZDR === "true" ? { zdr: true, data_collection: "deny" } : {}),
-      },
+      // Always enforced, not configurable: route only to zero-data-retention endpoints that don't collect
+      // data, and only to endpoints that honour response_format. No compliant endpoint -> 404 -> Groq.
+      provider: { zdr: true, data_collection: "deny", require_parameters: true },
     },
     signal,
   );
-
-const callGemini: Call = async (model, system, user, schema, signal) => {
-  const body = await post(
-    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
-    { "x-goog-api-key": process.env.GEMINI_API_KEY! },
-    {
-      systemInstruction: { parts: [{ text: system }] },
-      contents: [{ role: "user", parts: [{ text: user }] }],
-      generationConfig: {
-        temperature: 0.2,
-        maxOutputTokens: MAX_OUTPUT_TOKENS,
-        responseMimeType: "application/json",
-        responseJsonSchema: schema,
-        // Gemini 3.x: low thinking keeps a review inside the 30 s budget (PRD 9).
-        ...(model.startsWith("gemini-3") ? { thinkingConfig: { thinkingLevel: "low" } } : {}),
-      },
-    },
-    signal,
-  );
-  const candidate = body.candidates?.[0];
-  if (candidate?.finishReason && candidate.finishReason !== "STOP") throw new Error(`finishReason ${candidate.finishReason}`);
-  return (candidate?.content?.parts ?? [])
-    .filter((p: { thought?: boolean }) => !p.thought)
-    .map((p: { text?: string }) => p.text ?? "")
-    .join("");
-};
 
 // Providers reject some validation keywords; keep the shape (types, enums, required) and let Zod enforce limits.
 const UNSUPPORTED = new Set(["$schema", "pattern", "minLength", "maxLength", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "minItems", "maxItems", "format"]);
@@ -156,7 +126,7 @@ export async function generateStructured<T>(opts: {
   deadlineMs: number;
 }): Promise<{ data: T; model: string }> {
   const list = providers();
-  if (!list.length) throw new LlmUnavailableError("No AI provider is configured (set GROQ_API_KEY or GEMINI_API_KEY).");
+  if (!list.length) throw new LlmUnavailableError("No AI provider is configured (set OPENROUTER_API_KEY or GROQ_API_KEY).");
   const schema = providerSchema(opts.jsonSchema);
   const deadline = Date.now() + opts.deadlineMs;
   const errors: string[] = [];

@@ -1,11 +1,15 @@
+import { z } from "zod";
 import type { Prisma } from "@/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
+import { LlmUnavailableError } from "@/lib/ai/llm";
 import type { StaticAnalysis } from "@/lib/analysis";
 import { applyFixes, defaultSelection, isApplicable } from "@/lib/fixes";
-import { STATIC_ONLY_NOTICE, aiReview, staticReview, validateFixedCode } from "@/lib/pipeline";
+import { STATIC_ONLY_NOTICE, aiReview, improveCode, staticReview, validateFixedCode } from "@/lib/pipeline";
+import type { Viewer } from "@/lib/supabase/server";
 import {
   AppliedChange,
   ConceptPrimer,
+  ImproveChange,
   ReviewMetrics,
   ScoreReport,
   type CreateReviewRequest,
@@ -68,11 +72,26 @@ export async function retryAfterSeconds(clientHash: string): Promise<number | nu
   return Math.max(1, Math.ceil((recent[0].createdAt.getTime() + DAY_MS - Date.now()) / 1000));
 }
 
+/**
+ * Access rule (PRD 18 "private by default"): a review owned by an account is visible only to that account.
+ * Guest reviews have no owner and are reachable only through their unguessable id, like a private link.
+ * Callers get "not found" either way, so ids can't be probed.
+ */
+const canView = (ownerId: string | null, viewerId: string | null) => ownerId === null || ownerId === viewerId;
+
 /** Runs static analysis and stores a scored, static-only report so the client has results right away. */
-export async function createReview(req: CreateReviewRequest, clientHash: string | null) {
+export async function createReview(req: CreateReviewRequest, clientHash: string | null, viewer: Viewer | null) {
   const s = staticReview(req);
+  // Supabase Auth owns the account; mirror it so reviews can reference it (FK) and cascade on deletion.
+  if (viewer)
+    await prisma.user.upsert({
+      where: { id: viewer.id },
+      create: { id: viewer.id, email: viewer.email ?? `${viewer.id}@users.codeguard.invalid`, modePreference: req.mode },
+      update: {},
+    });
   const review = await prisma.review.create({
     data: {
+      userId: viewer?.id ?? null,
       language: req.language,
       mode: req.mode,
       status: "analyzing",
@@ -136,15 +155,23 @@ export async function completeReview(id: string, req: CreateReviewRequest, analy
 
 type FixVersionRow = { id: string; type: "improve" | "fix_safe"; code: string; changeList: unknown; validated: boolean; validationErrors: string[]; createdAt: Date };
 
-const toFixVersionDetail = (v: FixVersionRow): FixVersionDetail => ({
-  id: v.id,
-  type: v.type,
-  code: v.code,
-  changes: AppliedChange.array().safeParse(v.changeList).data ?? [],
-  validated: v.validated,
-  validation_errors: v.validationErrors,
-  created_at: v.createdAt.toISOString(),
-});
+// fix_safe versions store AppliedChange[]; improve versions store { summary, changes: ImproveChange[], model }.
+const ImproveRecord = z.object({ summary: z.string().nullable(), changes: ImproveChange.array() });
+
+const toFixVersionDetail = (v: FixVersionRow): FixVersionDetail => {
+  const improve = v.type === "improve" ? ImproveRecord.safeParse(v.changeList).data : undefined;
+  return {
+    id: v.id,
+    type: v.type,
+    code: v.code,
+    changes: v.type === "fix_safe" ? (AppliedChange.array().safeParse(v.changeList).data ?? []) : [],
+    improvements: improve?.changes ?? [],
+    summary: improve?.summary ?? null,
+    validated: v.validated,
+    validation_errors: v.validationErrors,
+    created_at: v.createdAt.toISOString(),
+  };
+};
 
 export class ReviewActionError extends Error {
   readonly status: number;
@@ -161,8 +188,8 @@ export class ReviewActionError extends Error {
  * it with static analysis and stores it. Without findingIds it applies every safe fix; needs-review fixes are
  * only applied when listed explicitly; manual-only fixes never are. The original code is never modified.
  */
-export async function createFixVersion(reviewId: string, findingIds?: string[]): Promise<FixVersionDetail> {
-  const review = await getReviewDetail(reviewId);
+export async function createFixVersion(reviewId: string, viewerId: string | null, findingIds?: string[]): Promise<FixVersionDetail> {
+  const review = await getReviewDetail(reviewId, viewerId);
   if (!review) throw new ReviewActionError(404, "not_found", "No review exists with that id.");
   if (review.status !== "completed") throw new ReviewActionError(409, "not_ready", "Fixes are available once the review has finished.");
 
@@ -197,8 +224,46 @@ export async function createFixVersion(reviewId: string, findingIds?: string[]):
   return toFixVersionDetail(row);
 }
 
+// Each rewrite is a paid LLM call; a few per review is plenty to compare.
+export const MAX_IMPROVE_VERSIONS = 3;
+
+/** FR-050 Improve Code: a full AI rewrite saved as a new, re-validated version. The original is never modified. */
+export async function createImproveVersion(reviewId: string, viewerId: string | null): Promise<FixVersionDetail> {
+  const review = await getReviewDetail(reviewId, viewerId);
+  if (!review) throw new ReviewActionError(404, "not_found", "No review exists with that id.");
+  if (review.status !== "completed") throw new ReviewActionError(409, "not_ready", "Improve Code is available once the review has finished.");
+  if (review.fix_versions.filter((v) => v.type === "improve").length >= MAX_IMPROVE_VERSIONS)
+    throw new ReviewActionError(429, "limit_reached", `This review already has ${MAX_IMPROVE_VERSIONS} improved versions. Start a new review to generate more.`);
+
+  let result: Awaited<ReturnType<typeof improveCode>>;
+  try {
+    result = await improveCode(review);
+  } catch (e) {
+    if (e instanceof LlmUnavailableError) {
+      console.error(`[review ${reviewId}] improve unavailable:`, e.message);
+      throw new ReviewActionError(503, "ai_unavailable", "The AI reviewer is unavailable right now, so the code couldn't be improved. Try again in a minute.");
+    }
+    throw e;
+  }
+
+  const row = await prisma.fixVersion.create({
+    data: {
+      reviewId,
+      type: "improve",
+      code: result.code,
+      changeList: json({ summary: result.summary, changes: result.changes, model: result.model }),
+      appliedRefs: [...new Set(result.changes.flatMap((c) => c.finding_refs))],
+      validated: result.check.validated,
+      validationErrors: result.check.errors,
+    },
+  });
+  return toFixVersionDetail(row);
+}
+
 /** Marks a finding as a false positive / ignored (or reopens it) and rescores, since false positives don't count. */
-export async function updateFindingStatus(reviewId: string, ref: string, update: UpdateFindingRequest) {
+export async function updateFindingStatus(reviewId: string, viewerId: string | null, ref: string, update: UpdateFindingRequest) {
+  const review = await prisma.review.findUnique({ where: { id: reviewId }, select: { userId: true } });
+  if (!review || !canView(review.userId, viewerId)) throw new ReviewActionError(404, "not_found", "No review exists with that id.");
   const found = await prisma.finding.findUnique({ where: { reviewId_ref: { reviewId, ref } }, select: { id: true } });
   if (!found) throw new ReviewActionError(404, "not_found", "No finding exists with that id in this review.");
   await prisma.finding.update({
@@ -211,12 +276,13 @@ export async function updateFindingStatus(reviewId: string, ref: string, update:
   return { finding_id: ref, status: update.status, scores };
 }
 
-export async function getReviewDetail(id: string): Promise<ReviewDetail | null> {
+/** The review as the given viewer may see it, or null if it doesn't exist or belongs to someone else. */
+export async function getReviewDetail(id: string, viewerId: string | null): Promise<ReviewDetail | null> {
   const r = await prisma.review.findUnique({
     where: { id },
     include: { findings: true, metrics: true, fixVersions: { orderBy: { createdAt: "desc" } } },
   });
-  if (!r) return null;
+  if (!r || !canView(r.userId, viewerId)) return null;
 
   const stale = r.status === "analyzing" && Date.now() - r.createdAt.getTime() > STALE_MS;
   const sev = { critical: 0, high: 1, medium: 2, low: 3, info: 4 } as const;

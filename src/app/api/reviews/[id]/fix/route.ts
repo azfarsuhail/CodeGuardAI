@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { apiError } from "@/lib/http";
 import { createFixVersion, ReviewActionError } from "@/lib/reviews";
 import { CreateFixRequest } from "@/lib/schemas";
+import { getViewer } from "@/lib/supabase/server";
 
 // POST /api/reviews/{id}/fix (PRD 15): creates a new, validated fixed version. Never touches the original.
 export async function POST(req: Request, ctx: RouteContext<"/api/reviews/[id]/fix">) {
@@ -17,7 +18,8 @@ export async function POST(req: Request, ctx: RouteContext<"/api/reviews/[id]/fi
   if (!parsed.success) return apiError(400, "validation_failed", parsed.error.issues[0].message);
 
   try {
-    const version = await createFixVersion(id, parsed.data.finding_ids);
+    const viewer = await getViewer();
+    const version = await createFixVersion(id, viewer?.id ?? null, parsed.data.finding_ids);
     return NextResponse.json(version, { status: 201 });
   } catch (e) {
     if (e instanceof ReviewActionError) return apiError(e.status, e.code, e.message);

@@ -1,12 +1,14 @@
 import { runStaticAnalysis, type StaticAnalysis } from "./analysis/index.ts";
 import { generateStructured } from "./ai/llm.ts";
 import { mergeFindings, mergeMetrics } from "./ai/merge.ts";
-import { PROMPT_VERSION, REVIEW_SYSTEM_PROMPT, buildReviewPrompt } from "./ai/prompt.ts";
+import { IMPROVE_SYSTEM_PROMPT, PROMPT_VERSION, REVIEW_SYSTEM_PROMPT, buildImprovePrompt, buildReviewPrompt } from "./ai/prompt.ts";
 import { LANGUAGES } from "./languages.ts";
 import { computeScores } from "./scoring.ts";
 import {
+  AiImproveOutput,
   AiReviewOutput,
   StudentReviewOutput,
+  aiImproveJsonSchema,
   aiReviewJsonSchema,
   type ConceptPrimer,
   type CreateReviewRequest,
@@ -38,6 +40,50 @@ export function staticReview(req: CreateReviewRequest): ReviewResult & { analysi
   const analysis = runStaticAnalysis(req.code, req.language, lintFileName(req.file_name, req.language));
   const findings = mergeFindings({ code: analysis.code, fileName: req.file_name, mode: req.mode, staticFindings: analysis.findings, ai: null });
   return { analysis, findings, scores: computeScores(findings), metrics: mergeMetrics(analysis.metrics, null) };
+}
+
+/**
+ * FR-050 Improve Code: an AI rewrite of the whole file plus a change list, re-validated like any fix.
+ * Throws LlmUnavailableError when no privacy-compliant provider answers.
+ */
+export async function improveCode(review: {
+  original_code: string;
+  language: CreateReviewRequest["language"];
+  file_name: string;
+  mode: CreateReviewRequest["mode"];
+  findings: Finding[];
+}) {
+  const { data, model } = await generateStructured({
+    system: IMPROVE_SYSTEM_PROMPT,
+    user: buildImprovePrompt({
+      code: review.original_code,
+      language: review.language,
+      fileName: review.file_name,
+      mode: review.mode,
+      findings: review.findings
+        .filter((f) => f.status !== "false_positive")
+        .map((f) => ({ id: f.id, severity: f.severity, category: f.category, title: f.title, start_line: f.location.start_line, fix: f.fix })),
+    }),
+    schema: AiImproveOutput,
+    jsonSchema: aiImproveJsonSchema,
+    deadlineMs: AI_DEADLINE_MS,
+  });
+  const lineCount = review.original_code.split("\n").length;
+  const known = new Set(review.findings.map((f) => f.id));
+  const changes = data.changes.map((c) => {
+    const start = Math.min(Math.max(1, c.start_line), lineCount);
+    return {
+      ...c,
+      // PRD 12.4: algorithm replacements need review whatever the model claims; manual_only is forbidden by the
+      // prompt, so if one slips through it still needs a human.
+      safety: c.safety === "manual_only" || (c.kind === "performance" && c.safety === "safe") ? ("needs_review" as const) : c.safety,
+      finding_refs: c.finding_refs.filter((r) => known.has(r)),
+      start_line: start,
+      end_line: Math.min(Math.max(start, c.end_line), lineCount),
+    };
+  });
+  const code = data.code.replace(/\r\n/g, "\n");
+  return { summary: data.summary, code, changes, model, check: validateFixedCode(review.original_code, code, review.language, review.file_name) };
 }
 
 /**

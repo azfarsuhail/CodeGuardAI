@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { AlertTriangle, ArrowLeft, Loader2, Wand2 } from "lucide-react";
+import { AlertTriangle, ArrowLeft, FileDown, Loader2, Wand2 } from "lucide-react";
 import { buttonVariants } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
@@ -12,6 +12,7 @@ import { ReviewDetail, type Finding, type FindingStatus, type FixSafety, type Sc
 import { cn } from "@/lib/utils";
 import { SAFETY, SEVERITY, SEVERITY_ORDER, SafetyBadge, SeverityBadge } from "./badges";
 import { FindingCard } from "./finding-card";
+import { ImprovePanel } from "./improve-panel";
 
 const POLL_MS = 2000;
 
@@ -150,14 +151,26 @@ export function ReviewView({ initial }: { initial: ReviewDetail }) {
               </time>
             </p>
           </div>
-          <Link
-            href={`/reviews/${review.id}/fix`}
-            aria-disabled={!done || fixable.length === 0}
-            className={cn(buttonVariants({ size: "lg" }), "h-11 px-5 font-bold", (!done || fixable.length === 0) && "pointer-events-none opacity-50")}
-          >
-            <Wand2 aria-hidden />
-            Fix code
-          </Link>
+          <div className="flex flex-wrap gap-2">
+            {/* A plain link: the browser downloads the Markdown the route returns as an attachment. */}
+            <a
+              href={`/api/reviews/${review.id}/export?format=md`}
+              download
+              aria-disabled={!done}
+              className={cn(buttonVariants({ variant: "outline", size: "lg" }), "h-11 bg-card px-4 font-bold", !done && "pointer-events-none opacity-50")}
+            >
+              <FileDown aria-hidden />
+              Download report
+            </a>
+            <Link
+              href={`/reviews/${review.id}/fix`}
+              aria-disabled={!done || fixable.length === 0}
+              className={cn(buttonVariants({ size: "lg" }), "h-11 px-5 font-bold", (!done || fixable.length === 0) && "pointer-events-none opacity-50")}
+            >
+              <Wand2 aria-hidden />
+              Fix code
+            </Link>
+          </div>
         </div>
       </header>
 
@@ -324,7 +337,10 @@ export function ReviewView({ initial }: { initial: ReviewDetail }) {
             </TabsContent>
 
             <TabsContent value="improvements">
-              <Improvements review={review} done={done} />
+              <div className="flex flex-col gap-8">
+                <ImprovePanel review={review} done={done} />
+                <Improvements review={review} done={done} />
+              </div>
             </TabsContent>
           </div>
         </Tabs>

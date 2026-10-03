@@ -20,6 +20,8 @@
     "@monaco-editor/react": "^4.7.0",
     "@prisma/adapter-pg": "^7.10.0",
     "@prisma/client": "^7.10.0",
+    "@supabase/ssr": "^0.12.7",
+    "@supabase/supabase-js": "^2.117.2",
     "@typescript-eslint/parser": "^8.71.0",
     "class-variance-authority": "^0.7.1",
     "cn": "^0.4.0",

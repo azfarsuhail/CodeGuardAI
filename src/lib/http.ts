@@ -6,8 +6,9 @@ export function apiError(status: number, code: string, message: string, details?
   return NextResponse.json({ error: { code, message, ...(details === undefined ? {} : { details }) } }, { status, headers });
 }
 
-// Salted hash so raw IPs are never stored.
-export function clientHash(req: Request): string {
+// Rate-limit key: the account for signed-in users, a salted hash of the IP for guests (raw IPs are never stored).
+export function clientHash(req: Request, userId?: string | null): string {
   const ip = req.headers.get("x-forwarded-for")?.split(",")[0].trim() || req.headers.get("x-real-ip") || "unknown";
-  return createHash("sha256").update(`${process.env.RATE_LIMIT_SALT ?? ""}:${ip}`).digest("hex").slice(0, 32);
+  const subject = userId ? `user:${userId}` : `ip:${ip}`;
+  return createHash("sha256").update(`${process.env.RATE_LIMIT_SALT ?? ""}:${subject}`).digest("hex").slice(0, 32);
 }

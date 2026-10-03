@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { AiReviewOutput, CreateReviewRequest, StudentReviewOutput, aiReviewJsonSchema, aiFixJsonSchema } from "./schemas.ts";
+import { AiReviewOutput, CreateReviewRequest, StudentReviewOutput, aiReviewJsonSchema, aiImproveJsonSchema } from "./schemas.ts";
 
 test("request applies defaults and enforces PRD limits", () => {
   const ok = CreateReviewRequest.parse({ code: "def f(a, b):\n    return a / b\n", language: "python", mode: "student" });
@@ -41,7 +41,7 @@ test("LLM review output validates and rejects malformed findings", () => {
 });
 
 test("JSON Schemas are strict enough for structured-output APIs", () => {
-  for (const schema of [aiReviewJsonSchema, aiFixJsonSchema] as Record<string, unknown>[]) {
+  for (const schema of [aiReviewJsonSchema, aiImproveJsonSchema] as Record<string, unknown>[]) {
     assert.equal(schema.type, "object");
     assert.equal(schema.additionalProperties, false);
   }

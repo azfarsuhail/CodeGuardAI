@@ -2,6 +2,7 @@ import { after, NextResponse } from "next/server";
 import { apiError, clientHash } from "@/lib/http";
 import { completeReview, createReview, DAILY_REVIEW_LIMIT, retryAfterSeconds } from "@/lib/reviews";
 import { CreateReviewRequest } from "@/lib/schemas";
+import { getViewer } from "@/lib/supabase/server";
 
 // Static analysis + the AI call run in this Node.js function. The analyzers (ESLint, Ruff WebAssembly)
 // are too large for the Edge runtime, so this stays on Node (still on the free tier).
@@ -26,7 +27,8 @@ export async function POST(req: Request) {
   }
 
   try {
-    const client = clientHash(req);
+    const viewer = await getViewer();
+    const client = clientHash(req, viewer?.id);
     const retryAfter = await retryAfterSeconds(client);
     if (retryAfter !== null)
       return apiError(
@@ -37,7 +39,7 @@ export async function POST(req: Request) {
         { "Retry-After": String(retryAfter) },
       );
 
-    const { id, analysis } = await createReview(parsed.data, client);
+    const { id, analysis } = await createReview(parsed.data, client, viewer);
     after(() => completeReview(id, parsed.data, analysis, startedAt));
     return NextResponse.json({ review_id: id, status: "analyzing" }, { status: 202 });
   } catch (e) {

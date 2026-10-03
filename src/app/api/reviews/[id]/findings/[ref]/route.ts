@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { apiError } from "@/lib/http";
 import { ReviewActionError, updateFindingStatus } from "@/lib/reviews";
 import { UpdateFindingRequest } from "@/lib/schemas";
+import { getViewer } from "@/lib/supabase/server";
 
 // PATCH /api/reviews/{id}/findings/{ref} (PRD 15): flag a false positive or reopen a finding; returns new scores.
 export async function PATCH(req: Request, ctx: RouteContext<"/api/reviews/[id]/findings/[ref]">) {
@@ -16,7 +17,8 @@ export async function PATCH(req: Request, ctx: RouteContext<"/api/reviews/[id]/f
   if (!parsed.success) return apiError(400, "validation_failed", parsed.error.issues[0].message);
 
   try {
-    return NextResponse.json(await updateFindingStatus(id, ref, parsed.data));
+    const viewer = await getViewer();
+    return NextResponse.json(await updateFindingStatus(id, viewer?.id ?? null, ref, parsed.data));
   } catch (e) {
     if (e instanceof ReviewActionError) return apiError(e.status, e.code, e.message);
     console.error(`[PATCH /api/reviews/${id}/findings/${ref}]`, e);
