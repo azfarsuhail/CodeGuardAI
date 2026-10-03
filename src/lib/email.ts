@@ -3,7 +3,9 @@ import { Resend } from "resend";
 // Transactional email, sent straight through Resend's API. Supabase's auth emails (confirm signup, reset
 // password) arrive here through its Send Email Hook (src/app/api/auth/email-hook), so Supabase's own mailer
 // and its default 2-emails-per-hour limit are out of the path.
-export const EMAIL_FROM = `CodeGuard AI <${process.env.EMAIL_FROM_ADDRESS || "noreply@cloudtest.tech"}>`; // a domain verified in Resend
+// A domain verified in Resend. EMAIL_FROM_ADDRESS may be a bare address or already "Name <address>".
+const from = process.env.EMAIL_FROM_ADDRESS?.trim() || "noreply@cloudtest.tech";
+export const EMAIL_FROM = from.includes("<") ? from : `CodeGuard AI <${from}>`;
 
 let client: Resend | null = null;
 
