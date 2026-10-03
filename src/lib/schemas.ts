@@ -132,8 +132,14 @@ export const AiReviewOutput = z.object({
   concept_primers: z.array(ConceptPrimer).max(5).describe("Student mode only; empty array in developer mode"),
 });
 
+// Parses developer-mode output (see aiDeveloperReviewJsonSchema) into the common shape.
+export const DeveloperReviewOutput = AiReviewOutput.extend({
+  findings: z.array(AiFinding.extend({ student_explanation: z.null().default(null) })).max(LIMITS.maxAiFindings),
+  concept_primers: z.array(ConceptPrimer).max(0).default([]),
+});
+
 // Student Mode is a Must (FR-061): output missing primers or explanations is rejected, which triggers the
-// LLM client's corrective retry. The JSON Schema sent to providers stays the same for both modes.
+// LLM client's corrective retry.
 export const StudentReviewOutput = AiReviewOutput.superRefine((o, ctx) => {
   if (o.concept_primers.length === 0)
     ctx.addIssue({ code: "custom", path: ["concept_primers"], message: "Student mode needs 1 to 5 concept primers." });
@@ -313,5 +319,14 @@ export type CreateFixRequest = z.infer<typeof CreateFixRequest>;
 export type UpdateFindingRequest = z.infer<typeof UpdateFindingRequest>;
 
 // JSON Schemas handed to Gemini (responseJsonSchema) / Groq (response_format.json_schema).
-export const aiReviewJsonSchema = z.toJSONSchema(AiReviewOutput);
+// The review's field descriptions only repeat REVIEW_SYSTEM_PROMPT; dropping them saves ~220 tokens per review
+// (Groq's free tier allows 8K tokens/min). Quiz and improve schemas keep theirs: their prompts rely on them.
+const noDescriptions = { override: (ctx: { jsonSchema: { description?: string } }) => void delete ctx.jsonSchema.description };
+export const aiReviewJsonSchema = z.toJSONSchema(AiReviewOutput, noDescriptions);
+// Developer mode isn't asked for the student fields at all: fewer output tokens, and nothing for Groq's strict
+// mode to reject when the model leaves out a required-but-null field (seen live).
+export const aiDeveloperReviewJsonSchema = z.toJSONSchema(
+  AiReviewOutput.omit({ concept_primers: true }).extend({ findings: z.array(AiFinding.omit({ student_explanation: true })).max(LIMITS.maxAiFindings) }),
+  noDescriptions,
+);
 export const aiImproveJsonSchema = z.toJSONSchema(AiImproveOutput);
