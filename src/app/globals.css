@@ -1,26 +1,89 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+/* Light-only for now: keep shadcn's dark: utilities inert instead of following the OS. */
+@custom-variant dark (&:is(.dark *));
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+  --font-display: var(--font-display);
+  --font-heading: var(--font-display);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-grid: var(--grid);
+  --color-sheet: var(--sheet);
+  --color-sheet-line: var(--sheet-line);
+  --color-sheet-muted: var(--sheet-muted);
+  --color-highlighter: var(--highlighter);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+/*
+ * Engineering-notebook paper with one dark "ink sheet" (the editor) on it.
+ * Highlighter yellow is reserved for the sheet: cursor, active line, focus.
+ */
+:root {
+  --background: #eef2f0;
+  --grid: #dde4e0;
+  --foreground: #16202b;
+  --card: #ffffff;
+  --card-foreground: #16202b;
+  --popover: #ffffff;
+  --popover-foreground: #16202b;
+  --primary: #2446d8;
+  --primary-foreground: #ffffff;
+  --secondary: #e2e8e5;
+  --secondary-foreground: #16202b;
+  --muted: #e2e8e5;
+  --muted-foreground: #4b5862;
+  --accent: #dce4f7;
+  --accent-foreground: #16202b;
+  --destructive: #b42318;
+  --border: #c9d3ce;
+  --input: #7d8b85;
+  --ring: #2446d8;
+  --radius: 0.5rem;
+  --sheet: #13202f;
+  --sheet-line: #26384d;
+  --sheet-muted: #a3b4c6;
+  --highlighter: #f4d35e;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
   }
-}
-
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  html {
+    @apply font-sans;
+  }
+  body {
+    @apply bg-background text-foreground;
+    background-image:
+      linear-gradient(var(--grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 24px 24px;
+    line-height: 1.6;
+  }
 }

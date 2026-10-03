@@ -2,18 +2,18 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { AiReviewOutput, CreateReviewRequest, aiReviewJsonSchema, aiFixJsonSchema } from "./schemas.ts";
 
-const metrics = { loc: 2, function_count: 1, cyclomatic: 1, nesting_depth: 1, duplication_pct: 0, functions: [] };
-
 test("request applies defaults and enforces PRD limits", () => {
-  const ok = CreateReviewRequest.parse({ code: "def f(a, b):\n    return a / b\n", language: "python", mode: "student", static_metrics: metrics });
+  const ok = CreateReviewRequest.parse({ code: "def f(a, b):\n    return a / b\n", language: "python", mode: "student" });
   assert.deepEqual(ok.focus, ["bugs", "security", "performance"]);
-  assert.equal(ok.static_findings.length, 0);
 
-  const tooLong = CreateReviewRequest.safeParse({ code: "x\n".repeat(1000), language: "python", mode: "developer", static_metrics: metrics });
+  const tooLong = CreateReviewRequest.safeParse({ code: "x\n".repeat(1000), language: "python", mode: "developer" });
   assert.equal(tooLong.success, false);
 
-  const badLang = CreateReviewRequest.safeParse({ code: "x", language: "cobol", mode: "developer", static_metrics: metrics });
+  const badLang = CreateReviewRequest.safeParse({ code: "x", language: "cobol", mode: "developer" });
   assert.equal(badLang.success, false);
+
+  const noFocus = CreateReviewRequest.safeParse({ code: "x", language: "java", mode: "developer", focus: [] });
+  assert.equal(noFocus.success, false);
 });
 
 test("LLM review output validates and rejects malformed findings", () => {

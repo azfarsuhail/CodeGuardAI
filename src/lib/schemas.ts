@@ -22,7 +22,7 @@ export const ScoreKey = z.enum(["quality", "security", "performance", "maintaina
 const line = z.int().min(1).max(LIMITS.maxLines);
 
 // ---------------------------------------------------------------------------
-// Client-side static analysis output. Sent with the review request; untrusted.
+// Static analysis output. Computed server-side so "Verified" can't be forged.
 // ---------------------------------------------------------------------------
 
 export const StaticFinding = z.object({
@@ -62,13 +62,11 @@ export const CreateReviewRequest = z.object({
     .refine((c) => c.split("\n").length <= LIMITS.maxLines, `Code exceeds ${LIMITS.maxLines} lines.`),
   language: Language,
   mode: ReviewMode,
-  focus: z.array(FocusArea).max(3).default(["bugs", "security", "performance"]),
+  focus: z.array(FocusArea).min(1, "Pick at least one focus area.").max(3).default(["bugs", "security", "performance"]),
   source_type: z.enum(["paste", "upload"]).default("paste"),
   file_name: z.string().trim().min(1).max(120).default("main"),
-  assignment_context: z.string().max(2000).optional(),
-  intended_behaviour: z.string().max(2000).optional(),
-  static_findings: z.array(StaticFinding).max(LIMITS.maxStaticFindings).default([]),
-  static_metrics: StaticMetrics,
+  assignment_context: z.string().max(2000, "Assignment description is over 2,000 characters.").optional(),
+  intended_behaviour: z.string().max(2000, "Intended behaviour is over 2,000 characters.").optional(),
 });
 
 // ---------------------------------------------------------------------------
