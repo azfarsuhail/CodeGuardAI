@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { HeaderProgress } from "@/components/gamification/progress";
 import { getViewer } from "@/lib/supabase/server";
 import { display, mono, sans } from "./fonts";
 import "./globals.css";
@@ -25,6 +26,10 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
           <nav aria-label="Account" className="flex flex-wrap items-center gap-x-5 gap-y-1 text-sm">
             {viewer ? (
               <>
+                <HeaderProgress userId={viewer.id} />
+                <Link href="/dashboard" className={navLink}>
+                  Dashboard
+                </Link>
                 <Link href="/history" className={navLink}>
                   History
                 </Link>

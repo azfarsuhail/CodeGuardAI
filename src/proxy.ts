@@ -3,7 +3,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 // Refreshes the Supabase session cookie on every request and sends signed-out visitors away from pages
 // that need an account. This is only the optimistic check: pages and API routes verify the user themselves.
-const SIGNED_IN_ONLY = ["/history", "/settings"];
+const SIGNED_IN_ONLY = ["/history", "/settings", "/dashboard"];
 
 export async function proxy(request: NextRequest) {
   let response = NextResponse.next({ request });
