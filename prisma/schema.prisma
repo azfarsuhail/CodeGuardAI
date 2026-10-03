@@ -1,0 +1,182 @@
+// CodeGuard AI - Phase 1 MVP data model (PRD Section 14).
+// Connection URLs live in prisma.config.ts (Prisma 7).
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  student
+  developer
+  instructor
+}
+
+enum Language {
+  python
+  javascript
+  typescript
+  java
+}
+
+enum ReviewMode {
+  developer
+  student
+}
+
+enum ReviewStatus {
+  queued
+  analyzing
+  completed
+  failed
+}
+
+enum SourceType {
+  paste
+  upload
+  github
+}
+
+enum FindingCategory {
+  bug
+  security
+  performance
+  quality
+  maintainability
+}
+
+enum Severity {
+  critical
+  high
+  medium
+  low
+  info
+}
+
+// static = analyzer only, ai = LLM only ("AI-suggested"), both = LLM confirmed analyzer evidence ("Verified").
+enum FindingSource {
+  static
+  ai
+  both
+}
+
+enum FindingStatus {
+  open
+  fixed
+  ignored
+  false_positive
+}
+
+// PRD 12.4. Only `safe` changes are applied by "Fix All Safe Issues".
+enum FixSafety {
+  safe
+  needs_review
+  manual_only
+}
+
+enum FixType {
+  improve
+  fix_safe
+}
+
+// id mirrors Supabase auth.users.id.
+model User {
+  id             String     @id @db.Uuid
+  email          String     @unique
+  name           String?
+  role           UserRole   @default(developer)
+  modePreference ReviewMode @default(developer)
+  createdAt      DateTime   @default(now())
+  reviews        Review[]
+}
+
+model Review {
+  id                String       @id @default(cuid())
+  userId            String?      @db.Uuid // null = guest review (FR-003)
+  user              User?        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  language          Language
+  mode              ReviewMode
+  status            ReviewStatus @default(queued)
+  sourceType        SourceType   @default(paste)
+  fileName          String       @default("main")
+  originalCode      String       @db.Text // immutable; fixes live in FixVersion
+  focus             String[]     @default([])
+  assignmentContext String?      @db.Text
+  intendedBehaviour String?      @db.Text
+  summary           String?      @db.Text
+  scores            Json? // ScoreReport
+  conceptPrimers    Json? // ConceptPrimer[] (Student Mode)
+  staticOnly        Boolean      @default(false) // LLM unavailable, static results only
+  errorMessage      String?
+  model             String?
+  promptVersion     String?
+  durationMs        Int?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+  findings          Finding[]
+  fixVersions       FixVersion[]
+  metrics           Metrics?
+
+  @@index([userId, createdAt(sort: Desc)])
+}
+
+model Finding {
+  id                 String          @id @default(cuid())
+  reviewId           String
+  review             Review          @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  ref                String // stable per-review id, e.g. "F-0012"
+  category           FindingCategory
+  severity           Severity
+  title              String
+  file               String
+  startLine          Int
+  endLine            Int
+  problem            String          @db.Text
+  why                String          @db.Text
+  fix                String          @db.Text
+  fixCode            String?         @db.Text
+  fixSafety          FixSafety
+  source             FindingSource
+  confidence         Float
+  cwe                String?
+  owasp              String?
+  studentExplanation String?         @db.Text
+  status             FindingStatus   @default(open)
+  feedback           String?         @db.Text
+  createdAt          DateTime        @default(now())
+
+  @@unique([reviewId, ref])
+  @@index([reviewId, severity])
+}
+
+model FixVersion {
+  id               String   @id @default(cuid())
+  reviewId         String
+  review           Review   @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  type             FixType
+  code             String   @db.Text
+  changeList       Json // FixChange[]
+  appliedRefs      String[] @default([]) // Finding.ref values addressed by this version
+  validated        Boolean  @default(false)
+  validationErrors String[] @default([])
+  createdAt        DateTime @default(now())
+
+  @@index([reviewId, createdAt])
+}
+
+model Metrics {
+  reviewId        String  @id
+  review          Review  @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  loc             Int
+  functionCount   Int
+  cyclomatic      Int // max across functions
+  nestingDepth    Int
+  duplicationPct  Float
+  timeComplexity  String?
+  spaceComplexity String?
+  functions       Json    @default("[]") // FunctionMetric[]
+}

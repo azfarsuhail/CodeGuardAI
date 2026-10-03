@@ -1,0 +1,206 @@
+import { z } from "zod";
+
+// PRD Section 9 limits.
+export const LIMITS = { maxLines: 1000, maxBytes: 100_000, maxStaticFindings: 200, maxAiFindings: 50 } as const;
+
+export const Language = z.enum(["python", "javascript", "typescript", "java"]);
+export const ReviewMode = z.enum(["developer", "student"]);
+export const FocusArea = z.enum(["bugs", "security", "performance"]);
+export const FindingCategory = z.enum(["bug", "security", "performance", "quality", "maintainability"]);
+export const Severity = z.enum(["critical", "high", "medium", "low", "info"]);
+export const FindingSource = z.enum(["static", "ai", "both"]);
+export const FindingStatus = z.enum(["open", "fixed", "ignored", "false_positive"]);
+export const FixSafety = z
+  .enum(["safe", "needs_review", "manual_only"])
+  .describe(
+    "safe = behaviour-preserving (rename, remove dead code, add null check, extract duplicate code, parameterise SQL); " +
+      "needs_review = algorithm replacement, return-type/public-API/concurrency change; " +
+      "manual_only = architectural or business-logic ambiguity",
+  );
+export const ScoreKey = z.enum(["quality", "security", "performance", "maintainability"]);
+
+const line = z.int().min(1).max(LIMITS.maxLines);
+
+// ---------------------------------------------------------------------------
+// Client-side static analysis output. Sent with the review request; untrusted.
+// ---------------------------------------------------------------------------
+
+export const StaticFinding = z.object({
+  id: z.string().regex(/^S-\d{1,4}$/),
+  tool: z.string().max(40),
+  rule: z.string().max(120),
+  message: z.string().max(500),
+  category: FindingCategory,
+  severity: Severity,
+  start_line: line,
+  end_line: line,
+});
+
+export const StaticFunctionMetric = z.object({
+  name: z.string().max(200),
+  start_line: line,
+  end_line: line,
+  cyclomatic: z.int().min(1).max(1000),
+  nesting_depth: z.int().min(0).max(100),
+});
+
+export const StaticMetrics = z.object({
+  loc: z.int().min(0).max(LIMITS.maxLines),
+  function_count: z.int().min(0).max(LIMITS.maxLines),
+  cyclomatic: z.int().min(0).max(1000),
+  nesting_depth: z.int().min(0).max(100),
+  duplication_pct: z.number().min(0).max(100),
+  functions: z.array(StaticFunctionMetric).max(LIMITS.maxLines),
+});
+
+// POST /api/reviews body (PRD 15).
+export const CreateReviewRequest = z.object({
+  code: z
+    .string()
+    .min(1, "Code is empty.")
+    .refine((c) => new TextEncoder().encode(c).length <= LIMITS.maxBytes, `Code exceeds ${LIMITS.maxBytes / 1000} KB.`)
+    .refine((c) => c.split("\n").length <= LIMITS.maxLines, `Code exceeds ${LIMITS.maxLines} lines.`),
+  language: Language,
+  mode: ReviewMode,
+  focus: z.array(FocusArea).max(3).default(["bugs", "security", "performance"]),
+  source_type: z.enum(["paste", "upload"]).default("paste"),
+  file_name: z.string().trim().min(1).max(120).default("main"),
+  assignment_context: z.string().max(2000).optional(),
+  intended_behaviour: z.string().max(2000).optional(),
+  static_findings: z.array(StaticFinding).max(LIMITS.maxStaticFindings).default([]),
+  static_metrics: StaticMetrics,
+});
+
+// ---------------------------------------------------------------------------
+// LLM structured output: review pass.
+// ---------------------------------------------------------------------------
+
+export const AiFinding = z.object({
+  id: z.string().regex(/^F-\d{4}$/).describe('Sequential id, e.g. "F-0001"'),
+  static_ref: z
+    .string()
+    .nullable()
+    .describe("id of the static analyzer finding this explains (e.g. \"S-3\"), or null if you found it yourself"),
+  category: FindingCategory,
+  severity: Severity,
+  title: z.string().max(160),
+  location: z.object({ start_line: line, end_line: line }),
+  evidence: z.string().max(500).describe("The source text of start_line, copied verbatim without the line-number prefix"),
+  problem: z.string().max(400).describe("One sentence: what is wrong"),
+  why: z.string().max(600).describe("Why it is a problem"),
+  fix: z.string().max(600).describe("What to change"),
+  fix_code: z.string().max(4000).nullable().describe("Replacement code for start_line..end_line, or null"),
+  fix_safety: FixSafety,
+  confidence: z.number().min(0).max(1),
+  cwe: z.string().regex(/^CWE-\d+$/).nullable(),
+  owasp: z.string().max(80).nullable().describe('OWASP Top 10 category, e.g. "A03:2021 Injection", or null'),
+  student_explanation: z
+    .string()
+    .max(600)
+    .nullable()
+    .describe("Student mode only: plain-language explanation, max ~80 words. null in developer mode"),
+});
+
+export const FunctionComplexity = z.object({
+  name: z.string().max(200),
+  start_line: line,
+  end_line: line,
+  time_complexity: z.string().max(40).describe('Big-O, e.g. "O(n^2)"'),
+  space_complexity: z.string().max(40),
+  explanation: z.string().max(400),
+  suggestion: z.string().max(400).nullable(),
+});
+
+export const ConceptPrimer = z.object({
+  concept: z.string().max(80),
+  explanation: z.string().max(600),
+});
+
+export const AiReviewOutput = z.object({
+  summary: z.string().max(1000),
+  findings: z.array(AiFinding).max(LIMITS.maxAiFindings),
+  complexity: z.object({
+    time_complexity: z.string().max(40).describe("Worst function's time complexity"),
+    space_complexity: z.string().max(40),
+    functions: z.array(FunctionComplexity).max(100),
+  }),
+  concept_primers: z.array(ConceptPrimer).max(5).describe("Student mode only; empty array in developer mode"),
+});
+
+// ---------------------------------------------------------------------------
+// LLM structured output: fix / improve pass (PRD 8.6).
+// ---------------------------------------------------------------------------
+
+export const FixChange = z.object({
+  finding_refs: z.array(z.string()).describe("Finding ids addressed by this change; empty for pure improvements"),
+  description: z.string().max(400),
+  safety: FixSafety,
+  start_line: line.describe("First affected line in the ORIGINAL code"),
+  end_line: line,
+});
+
+export const AiFixOutput = z.object({
+  code: z.string().max(LIMITS.maxBytes * 2).describe("The complete revised file"),
+  changes: z.array(FixChange).max(100),
+});
+
+// ---------------------------------------------------------------------------
+// Persisted / API response shapes.
+// ---------------------------------------------------------------------------
+
+// PRD 12.3 finding schema, after merge with static evidence.
+export const Finding = z.object({
+  id: z.string(),
+  category: FindingCategory,
+  severity: Severity,
+  title: z.string(),
+  location: z.object({ file: z.string(), start_line: z.int(), end_line: z.int() }),
+  problem: z.string(),
+  why: z.string(),
+  fix: z.string(),
+  fix_code: z.string().nullable(),
+  fix_safety: FixSafety,
+  source: FindingSource,
+  confidence: z.number().min(0).max(1),
+  cwe: z.string().nullable(),
+  owasp: z.string().nullable(),
+  student_explanation: z.string().nullable(),
+  status: FindingStatus,
+});
+
+// PRD 13: explainable scores.
+export const ScoreReport = z.object({
+  quality: z.number().min(0).max(100),
+  security: z.number().min(0).max(100),
+  performance: z.number().min(0).max(100),
+  maintainability: z.number().min(0).max(100),
+  overall: z.number().min(0).max(100),
+  deductions: z.array(z.object({ finding_ref: z.string(), score: ScoreKey, points: z.number() })),
+  security_capped: z.boolean().describe("A critical security finding capped Security at 60"),
+});
+
+export type Language = z.infer<typeof Language>;
+export type ReviewMode = z.infer<typeof ReviewMode>;
+export type FocusArea = z.infer<typeof FocusArea>;
+export type FindingCategory = z.infer<typeof FindingCategory>;
+export type Severity = z.infer<typeof Severity>;
+export type FindingSource = z.infer<typeof FindingSource>;
+export type FindingStatus = z.infer<typeof FindingStatus>;
+export type FixSafety = z.infer<typeof FixSafety>;
+export type ScoreKey = z.infer<typeof ScoreKey>;
+export type StaticFinding = z.infer<typeof StaticFinding>;
+export type StaticFunctionMetric = z.infer<typeof StaticFunctionMetric>;
+export type StaticMetrics = z.infer<typeof StaticMetrics>;
+export type CreateReviewRequest = z.infer<typeof CreateReviewRequest>;
+export type AiFinding = z.infer<typeof AiFinding>;
+export type FunctionComplexity = z.infer<typeof FunctionComplexity>;
+export type ConceptPrimer = z.infer<typeof ConceptPrimer>;
+export type AiReviewOutput = z.infer<typeof AiReviewOutput>;
+export type FixChange = z.infer<typeof FixChange>;
+export type AiFixOutput = z.infer<typeof AiFixOutput>;
+export type Finding = z.infer<typeof Finding>;
+export type ScoreReport = z.infer<typeof ScoreReport>;
+
+// JSON Schemas handed to Gemini (responseJsonSchema) / Groq (response_format.json_schema).
+export const aiReviewJsonSchema = z.toJSONSchema(AiReviewOutput);
+export const aiFixJsonSchema = z.toJSONSchema(AiFixOutput);
