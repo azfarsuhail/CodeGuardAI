@@ -30,21 +30,26 @@ const PER_CALL_TIMEOUT_MS = 30_000;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // Privacy-first cascade (PRD 18): only providers whose terms exclude training on submitted code.
-//   1. Groq: API data is not used for training; ~7 s per review, inside the 30 s target (PRD 9).
-//   2. OpenRouter, paid Nemotron, routed exclusively to zero-data-retention endpoints (enforced per request).
-//      Its only ZDR endpoint is often rate-limited upstream, which is why it is the fallback, not the primary.
+//   1. OpenRouter, paid Llama 3.1 8B on the highest-throughput (":nitro") endpoint, routed exclusively to
+//      zero-data-retention endpoints (enforced per request). Several ZDR hosts serve it, so it isn't held
+//      hostage by one provider's rate limits, and it costs fractions of a cent per review.
+//   2. Groq: API data is not used for training. Its free tier allows only 8K tokens/min (about two reviews).
 // No Gemini and no free-tier models: their terms allow training on prompts. If both fail, the review
 // degrades to static-analysis results, so code never goes anywhere else.
-export const OPENROUTER_DEFAULT_MODEL = "nvidia/nemotron-3-super-120b-a12b";
+export const OPENROUTER_DEFAULT_MODEL = "meta-llama/llama-3.1-8b-instruct:nitro";
 
 function providers(): Provider[] {
   const list: Provider[] = [];
-  if (process.env.GROQ_API_KEY) list.push({ name: "groq", model: process.env.GROQ_MODEL || "openai/gpt-oss-120b", call: callGroq });
   const orModel = process.env.OPENROUTER_MODEL || OPENROUTER_DEFAULT_MODEL;
   // Free routes may train on prompts; refuse them outright rather than rely on ZDR routing to 404.
   if (process.env.OPENROUTER_API_KEY && !orModel.endsWith(":free")) list.push({ name: "openrouter", model: orModel, call: callOpenRouter });
+  if (process.env.GROQ_API_KEY) list.push({ name: "groq", model: process.env.GROQ_MODEL || "openai/gpt-oss-120b", call: callGroq });
   return list;
 }
+
+// Only reasoning models accept the `reasoning` parameter; sending it to others makes require_parameters
+// match no endpoint at all (404).
+const isReasoningModel = (model: string) => /gpt-oss|nemotron|deepseek-r1|qwen3/i.test(model);
 
 async function post(url: string, headers: Record<string, string>, body: unknown, signal: AbortSignal) {
   const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body), signal });
@@ -105,7 +110,7 @@ const callOpenRouter: Call = (model, system, user, schema, signal) =>
       messages: messages(system, user),
       response_format: { type: "json_schema", json_schema: { name: "codeguard_output", strict: true, schema } },
       // Unbounded reasoning can run for minutes and eat the output budget.
-      reasoning: { effort: "low", exclude: true },
+      ...(isReasoningModel(model) ? { reasoning: { effort: "low", exclude: true } } : {}),
       // Always enforced, not configurable: route only to zero-data-retention endpoints that don't collect
       // data, and only to endpoints that honour response_format. No compliant endpoint -> 404 -> Groq.
       provider: { zdr: true, data_collection: "deny", require_parameters: true },
@@ -134,6 +139,8 @@ export async function generateStructured<T>(opts: {
   schema: z.ZodType<T>;
   jsonSchema: unknown;
   deadlineMs: number;
+  /** Called before a back-off wait (rate limit or overload) with its length, and with 0 when it ends. */
+  onWait?: (ms: number) => unknown;
 }): Promise<{ data: T; model: string }> {
   const list = providers();
   if (!list.length) throw new LlmUnavailableError("No AI provider is configured (set OPENROUTER_API_KEY or GROQ_API_KEY).");
@@ -144,9 +151,9 @@ export async function generateStructured<T>(opts: {
   for (const p of list) {
     const label = `${p.name}:${p.model}`;
     let user = opts.user;
-    let backoffs = 1;
-    // A second attempt for malformed output, one back-off for transient HTTP errors; anything else
-    // (bad key, bad request, network failure) moves straight to the next provider.
+    let backoffs = 0;
+    // A second attempt for malformed output; back-offs for transient errors (one, or up to three for a rate
+    // limit: on a free tier that is a queue, not an outage). Anything else moves straight to the next provider.
     for (let attempt = 1; attempt <= 2; ) {
       const remaining = deadline - Date.now();
       if (remaining < 3000) {
@@ -170,8 +177,15 @@ export async function generateStructured<T>(opts: {
         // Network blips ("fetch failed") are as transient as a 503; a stalled call already used its 30 s, so move on.
         const transient = e instanceof HttpError ? TRANSIENT.has(e.status) : !(e instanceof Error && /Timeout|Abort/.test(e.name));
         const wait = Math.min(MAX_BACKOFF_MS, (e instanceof HttpError && e.retryAfterMs) || BACKOFF_MS);
-        if (transient && backoffs-- > 0 && deadline - Date.now() > wait + 5000) {
+        const maxBackoffs = e instanceof HttpError && e.status === 429 ? 3 : 1;
+        if (transient && backoffs++ < maxBackoffs && deadline - Date.now() > wait + 5000) {
+          const notify = (ms: number) =>
+            Promise.resolve()
+              .then(() => opts.onWait?.(ms))
+              .catch(() => {}); // a progress note must never break the review
+          await notify(wait);
           await sleep(wait);
+          await notify(0);
           continue;
         }
         break;

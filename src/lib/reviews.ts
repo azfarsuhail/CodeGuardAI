@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { LlmUnavailableError } from "@/lib/ai/llm";
 import type { StaticAnalysis } from "@/lib/analysis";
 import { applyFixes, defaultSelection, isApplicable } from "@/lib/fixes";
-import { STATIC_ONLY_NOTICE, aiReview, improveCode, staticReview, validateFixedCode } from "@/lib/pipeline";
+import { AI_DEADLINE_MS, STATIC_ONLY_NOTICE, aiReview, improveCode, staticReview, validateFixedCode, waitingNotice } from "@/lib/pipeline";
 import type { Viewer } from "@/lib/supabase/server";
 import { syncGamification } from "@/lib/gamification/sync";
 import {
@@ -165,7 +165,8 @@ async function syncXp(userId: string | null) {
 }
 
 export async function completeReview(id: string, req: CreateReviewRequest, analysis: StaticAnalysis, startedAt: number, userId: string | null = null) {
-  const r = await aiReview(req, analysis); // never throws; degrades to static-only itself
+  // Never throws; degrades to static-only itself. A rate-limit wait shows up in the polled review as a notice.
+  const r = await aiReview(req, analysis, AI_DEADLINE_MS, (ms) => prisma.review.update({ where: { id }, data: { notice: ms ? waitingNotice(ms) : null } }));
   const save = () =>
     prisma.$transaction([
       prisma.finding.deleteMany({ where: { reviewId: id } }),

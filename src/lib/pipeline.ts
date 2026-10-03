@@ -6,8 +6,10 @@ import { LANGUAGES } from "./languages.ts";
 import { computeScores } from "./scoring.ts";
 import {
   AiImproveOutput,
-  AiReviewOutput,
+  DeveloperReviewOutput,
+  type AiReviewOutput,
   StudentReviewOutput,
+  aiDeveloperReviewJsonSchema,
   aiImproveJsonSchema,
   aiReviewJsonSchema,
   type ConceptPrimer,
@@ -22,6 +24,11 @@ import {
 export const AI_DEADLINE_MS = 75_000;
 
 export const STATIC_ONLY_NOTICE = "The AI reviewer is unavailable right now, so this report shows static-analysis results only.";
+// Shown while the LLM client backs off from a rate limit; replaced when the review completes.
+export function waitingNotice(ms: number) {
+  const s = Math.ceil(ms / 1000);
+  return `High traffic. Waiting ${s} second${s === 1 ? "" : "s"} for the AI reviewer…`;
+}
 
 export type ReviewResult = {
   findings: Finding[];
@@ -123,6 +130,7 @@ export async function aiReview(
   req: CreateReviewRequest,
   analysis: StaticAnalysis,
   deadlineMs = AI_DEADLINE_MS,
+  onWait?: (ms: number) => unknown,
 ): Promise<ReviewResult & { summary: string | null; conceptPrimers: ConceptPrimer[]; model: string | null; promptVersion: string | null; notice: string | null }> {
   let ai: AiReviewOutput | null = null;
   let model: string | null = null;
@@ -140,9 +148,11 @@ export async function aiReview(
         staticFindings: analysis.findings,
         metrics: analysis.metrics,
       }),
-      schema: req.mode === "student" ? StudentReviewOutput : AiReviewOutput,
-      jsonSchema: aiReviewJsonSchema,
+      ...(req.mode === "student"
+        ? { schema: StudentReviewOutput, jsonSchema: aiReviewJsonSchema }
+        : { schema: DeveloperReviewOutput, jsonSchema: aiDeveloperReviewJsonSchema }),
       deadlineMs,
+      onWait,
     }));
   } catch (e) {
     // Graceful degradation (PRD 9): static findings still make a complete, scored report.

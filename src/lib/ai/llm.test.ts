@@ -21,6 +21,8 @@ function mockFetch(responses: Record<string, Array<() => Response>>) {
 }
 const reply = (content: string) => () => Response.json({ choices: [{ message: { content } }] });
 const ENV = ["OPENROUTER_API_KEY", "OPENROUTER_MODEL", "GROQ_API_KEY", "GEMINI_API_KEY"];
+const OR = "openrouter.ai";
+const GROQ = "api.groq.com";
 
 beforeEach(() => {
   calls = [];
@@ -36,81 +38,92 @@ afterEach(() => {
 
 const run = () => generateStructured({ system: "s", user: "u", schema, jsonSchema, deadlineMs: 10_000 });
 
-test("Groq is primary", async () => {
-  mockFetch({ "api.groq.com": [reply('```json\n{"answer":"ok"}\n```')] });
-  assert.deepEqual(await run(), { data: { answer: "ok" }, model: "groq:openai/gpt-oss-120b" });
-  assert.deepEqual(calls, ["api.groq.com"]);
+test("OpenRouter is primary, with zero data retention always enforced", async () => {
+  mockFetch({ [OR]: [reply('```json\n{"answer":"ok"}\n```')] });
+  assert.deepEqual(await run(), { data: { answer: "ok" }, model: "openrouter:meta-llama/llama-3.1-8b-instruct:nitro" });
+  assert.deepEqual(calls, [OR]);
+  assert.deepEqual(bodies[0].provider, { zdr: true, data_collection: "deny", require_parameters: true });
+  assert.equal((bodies[0].response_format as { type: string }).type, "json_schema");
+  // No ZDR endpoint of a non-reasoning model lists `reasoning`, so require_parameters would match none.
+  assert.equal("reasoning" in bodies[0], false);
 });
 
-test("OpenRouter is the only fallback, with zero data retention always enforced", async () => {
+test("reasoning models on OpenRouter get a bounded reasoning budget", async () => {
+  process.env.OPENROUTER_MODEL = "nvidia/nemotron-3-super-120b-a12b";
+  mockFetch({ [OR]: [reply('{"answer":"ok"}')] });
+  await run();
+  assert.deepEqual(bodies[0].reasoning, { effort: "low", exclude: true });
+});
+
+test("Groq is the only fallback", async () => {
   mockFetch({
-    "api.groq.com": [() => new Response("Invalid API Key", { status: 401 })],
-    "openrouter.ai": [reply("{\"answer\":\"or\"}")],
+    [OR]: [() => new Response('{"error":{"message":"No endpoints found matching your data policy"}}', { status: 404 })],
+    [GROQ]: [reply('{"answer":"groq"}')],
   });
-  assert.deepEqual(await run(), { data: { answer: "or" }, model: "openrouter:nvidia/nemotron-3-super-120b-a12b" });
-  assert.deepEqual(calls, ["api.groq.com", "openrouter.ai"]);
-  assert.deepEqual(bodies[1].provider, { zdr: true, data_collection: "deny", require_parameters: true });
-  assert.equal((bodies[1].response_format as { type: string }).type, "json_schema");
+  assert.deepEqual(await run(), { data: { answer: "groq" }, model: "groq:openai/gpt-oss-120b" });
+  assert.deepEqual(calls, [OR, GROQ]);
 });
 
 test("Gemini is never called, even with a key set; both down raises LlmUnavailableError", async () => {
   process.env.GEMINI_API_KEY = "still-set";
   mockFetch({
-    "api.groq.com": [() => new Response("Invalid API Key", { status: 401 })],
-    "openrouter.ai": [() => new Response("{\"error\":{\"message\":\"No endpoints found matching your data policy\"}}", { status: 404 })],
+    [OR]: [() => new Response('{"error":{"message":"No endpoints found matching your data policy"}}', { status: 404 })],
+    [GROQ]: [() => new Response("Invalid API Key", { status: 401 })],
   });
   await assert.rejects(run(), LlmUnavailableError);
-  assert.deepEqual(calls, ["api.groq.com", "openrouter.ai"]);
+  assert.deepEqual(calls, [OR, GROQ]);
 });
 
 test("free OpenRouter models are refused (their routes may train on prompts)", async () => {
-  process.env.OPENROUTER_MODEL = "nvidia/nemotron-3-super-120b-a12b:free";
-  mockFetch({ "api.groq.com": [() => new Response("Invalid API Key", { status: 401 })] });
+  process.env.OPENROUTER_MODEL = "meta-llama/llama-3.1-8b-instruct:free";
+  mockFetch({ [GROQ]: [() => new Response("Invalid API Key", { status: 401 })] });
   await assert.rejects(run(), LlmUnavailableError);
-  assert.deepEqual(calls, ["api.groq.com"]);
+  assert.deepEqual(calls, [GROQ]);
 });
 
 test("upstream error inside a 200 body falls through to the next provider", async () => {
   mockFetch({
-    "api.groq.com": [() => Response.json({ error: { code: 400, message: "Provider returned error" } })],
-    "openrouter.ai": [reply("{\"answer\":\"or\"}")],
+    [OR]: [() => Response.json({ error: { code: 400, message: "Provider returned error" } })],
+    [GROQ]: [reply('{"answer":"groq"}')],
   });
-  assert.equal((await run()).data.answer, "or");
+  assert.equal((await run()).data.answer, "groq");
 });
 
 test("retries once on schema violation, then falls back", async () => {
   mockFetch({
-    "api.groq.com": [reply("{\"answer\":\"too long\"}"), reply("not json")],
-    "openrouter.ai": [reply("{\"answer\":\"or\"}")],
+    [OR]: [reply('{"answer":"too long"}'), reply("not json")],
+    [GROQ]: [reply('{"answer":"groq"}')],
   });
-  assert.equal((await run()).data.answer, "or");
-  assert.deepEqual(calls, ["api.groq.com", "api.groq.com", "openrouter.ai"]);
+  assert.equal((await run()).data.answer, "groq");
+  assert.deepEqual(calls, [OR, OR, GROQ]);
   assert.match(JSON.stringify(bodies[1].messages), /previous response was rejected/);
 });
 
 test("Groq's strict-mode schema 400 gets the corrective retry, not a fallback (seen live)", async () => {
+  delete process.env.OPENROUTER_API_KEY;
   const failed = '{"error":{"message":"Generated JSON does not match the expected schema. Please adjust your prompt. See \'failed_generation\' for more details. Error: jsonschema: \'/findings/0\' does not validate: missing properties: \'student_explanation\'","type":"invalid_request_error","code":"json_validate_failed"}}';
-  mockFetch({ "api.groq.com": [() => new Response(failed, { status: 400 }), reply('{"answer":"ok"}')] });
+  mockFetch({ [GROQ]: [() => new Response(failed, { status: 400 }), reply('{"answer":"ok"}')] });
   assert.deepEqual(await run(), { data: { answer: "ok" }, model: "groq:openai/gpt-oss-120b" });
-  assert.deepEqual(calls, ["api.groq.com", "api.groq.com"]);
+  assert.deepEqual(calls, [GROQ, GROQ]);
   assert.match(JSON.stringify(bodies[1].messages), /missing properties: 'student_explanation'/);
 });
 
 test("a transient 503 gets one back-off retry on the same model", async () => {
-  mockFetch({ "api.groq.com": [() => new Response("busy", { status: 503 }), reply("{\"answer\":\"ok\"}")] });
+  mockFetch({ [OR]: [() => new Response("busy", { status: 503 }), reply('{"answer":"ok"}')] });
   assert.equal((await run()).data.answer, "ok");
-  assert.deepEqual(calls, ["api.groq.com", "api.groq.com"]);
+  assert.deepEqual(calls, [OR, OR]);
 });
 
 test("a 429 waits for the provider's Retry-After before retrying", async () => {
-  mockFetch({ "api.groq.com": [() => new Response("slow down", { status: 429, headers: { "retry-after": "1" } }), reply("{\"answer\":\"ok\"}")] });
+  mockFetch({ [OR]: [() => new Response("slow down", { status: 429, headers: { "retry-after": "1" } }), reply('{"answer":"ok"}')] });
   const started = Date.now();
   assert.equal((await run()).data.answer, "ok");
   assert.ok(Date.now() - started >= 950, "should wait ~1 s");
 });
 
 test("a 429 without Retry-After honours Groq's in-body 'try again in Xs' hint", async () => {
-  mockFetch({ "api.groq.com": [() => new Response('{"error":{"message":"Rate limit reached. Please try again in 1.2s."}}', { status: 429 }), reply('{"answer":"ok"}')] });
+  delete process.env.OPENROUTER_API_KEY;
+  mockFetch({ [GROQ]: [() => new Response('{"error":{"message":"Rate limit reached. Please try again in 1.2s."}}', { status: 429 }), reply('{"answer":"ok"}')] });
   const started = Date.now();
   assert.equal((await run()).data.answer, "ok");
   assert.ok(Date.now() - started >= 1150, "should wait ~1.2 s, not the 2 s default");
@@ -119,11 +132,11 @@ test("a 429 without Retry-After honours Groq's in-body 'try again in Xs' hint", 
 
 test("a network failure also gets one back-off retry", async () => {
   mockFetch({
-    "api.groq.com": [
+    [OR]: [
       () => {
         throw new TypeError("fetch failed");
       },
-      reply("{\"answer\":\"ok\"}"),
+      reply('{"answer":"ok"}'),
     ],
   });
   assert.equal((await run()).data.answer, "ok");
@@ -139,4 +152,32 @@ test("provider schema drops validation keywords but keeps structure", () => {
   assert.deepEqual(s.properties.answer, { type: "string" });
   assert.deepEqual(s.required, ["answer"]);
   assert.equal("$schema" in s, false);
+});
+
+test("onWait hears about a back-off before it happens, and its failure can't break the review", async () => {
+  mockFetch({ [OR]: [() => new Response("slow down", { status: 429, headers: { "retry-after": "1" } }), reply('{"answer":"ok"}')] });
+  const waits: number[] = [];
+  const r = await generateStructured({
+    system: "s", user: "u", schema, jsonSchema, deadlineMs: 10_000,
+    onWait: (ms) => {
+      waits.push(ms);
+      throw new Error("database down");
+    },
+  });
+  assert.equal(r.data.answer, "ok");
+  assert.deepEqual(waits, [1000, 0]);
+});
+
+test("a rate limit is waited out up to three times before falling back; other errors once", async () => {
+  const limited = () => new Response("slow down", { status: 429, headers: { "retry-after": "0.05" } });
+  mockFetch({ [OR]: [limited, limited, limited, reply('{"answer":"ok"}')] });
+  assert.equal((await run()).data.answer, "ok");
+  assert.equal(calls.length, 4);
+  calls = [];
+  mockFetch({
+    [OR]: [() => new Response("busy", { status: 503 }), () => new Response("busy", { status: 503 })],
+    [GROQ]: [reply('{"answer":"groq"}')],
+  });
+  assert.equal((await run()).data.answer, "groq");
+  assert.deepEqual(calls, [OR, OR, GROQ]);
 });
