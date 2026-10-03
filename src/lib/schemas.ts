@@ -66,7 +66,7 @@ export const CreateReviewRequest = z.object({
   language: Language,
   mode: ReviewMode,
   focus: z.array(FocusArea).min(1, "Pick at least one focus area.").max(3).default(["bugs", "security", "performance"]),
-  source_type: z.enum(["paste", "upload"]).default("paste"),
+  source_type: z.enum(["paste", "upload", "github"]).default("paste"),
   file_name: z.string().trim().min(1).max(120).default("main"),
   assignment_context: z.string().max(2000, "Assignment description is over 2,000 characters.").optional(),
   intended_behaviour: z.string().max(2000, "Intended behaviour is over 2,000 characters.").optional(),

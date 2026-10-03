@@ -4,6 +4,7 @@ import { useMemo, useState, type ChangeEvent } from "react";
 import { useRouter } from "next/navigation";
 import { FileUp, Loader2 } from "lucide-react";
 import { CodeEditor } from "@/components/code-editor";
+import { GitHubImport, type ImportedFile } from "@/components/github-import";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
@@ -26,12 +27,13 @@ const LANGUAGE_ITEMS = LANGUAGE_IDS.map((id) => ({ value: id, label: LANGUAGES[i
 const encoder = new TextEncoder();
 const kb = (bytes: number) => (bytes / 1000).toFixed(1);
 
-export function AnalyzeForm({ className }: { className?: string }) {
+export function AnalyzeForm({ className, githubImport = false }: { className?: string; githubImport?: boolean }) {
   const router = useRouter();
   const [code, setCode] = useState("");
   const [language, setLanguage] = useState<Language>("python");
   const [mode, setMode] = useState<ReviewMode>("developer");
   const [uploadedName, setUploadedName] = useState<string | null>(null);
+  const [source, setSource] = useState<"paste" | "upload" | "github">("paste");
   const [focus, setFocus] = useState<FocusArea[]>(["bugs", "security", "performance"]);
   const [assignment, setAssignment] = useState("");
   const [intended, setIntended] = useState("");
@@ -57,11 +59,21 @@ export function AnalyzeForm({ className }: { className?: string }) {
     setCode(text);
     setLanguage(lang);
     setUploadedName(file.name);
+    setSource("upload");
+  }
+
+  function importFromGitHub(file: ImportedFile) {
+    setError(null);
+    setCode(file.code);
+    setLanguage(file.language);
+    setUploadedName(file.path.length > 120 ? file.path.slice(-120) : file.path);
+    setSource("github");
   }
 
   function loadExample() {
     setError(null);
     setUploadedName(null);
+    setSource("paste");
     setCode(LANGUAGES[language].sample);
   }
 
@@ -72,7 +84,7 @@ export function AnalyzeForm({ className }: { className?: string }) {
       language,
       mode,
       focus,
-      source_type: uploadedName ? "upload" : "paste",
+      source_type: source,
       file_name: uploadedName ?? defaultFileName(language),
       assignment_context: assignment.trim() || undefined,
       intended_behaviour: intended.trim() || undefined,
@@ -149,6 +161,8 @@ export function AnalyzeForm({ className }: { className?: string }) {
             Open file
             <input type="file" accept={ACCEPT} onChange={openFile} className="sr-only" />
           </label>
+
+          {githubImport && <GitHubImport onPick={importFromGitHub} />}
 
           {code === "" && (
             <Button

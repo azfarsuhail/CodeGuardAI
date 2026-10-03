@@ -1,7 +1,9 @@
 import { AnalyzeForm } from "@/components/analyze-form";
+import { getViewer } from "@/lib/supabase/server";
 
 export default async function Home({ searchParams }: PageProps<"/">) {
   const deleted = (await searchParams).account === "deleted";
+  const viewer = await getViewer();
   return (
     <main className="mx-auto max-w-5xl px-4 pt-10 pb-16 sm:px-6 sm:pt-14">
       {deleted && (
@@ -16,7 +18,7 @@ export default async function Home({ searchParams }: PageProps<"/">) {
         Paste a file and CodeGuard checks it for bugs, security holes and slow spots, then tells you what&apos;s wrong,
         why it matters and how to fix it.
       </p>
-      <AnalyzeForm className="mt-10" />
+      <AnalyzeForm className="mt-10" githubImport={viewer !== null} />
     </main>
   );
 }
