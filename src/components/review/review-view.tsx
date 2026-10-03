@@ -13,6 +13,7 @@ import { cn } from "@/lib/utils";
 import { SAFETY, SEVERITY, SEVERITY_ORDER, SafetyBadge, SeverityBadge } from "./badges";
 import { FindingCard } from "./finding-card";
 import { ImprovePanel } from "./improve-panel";
+import { QuizModal } from "@/components/quiz/quiz-modal";
 
 const POLL_MS = 2000;
 
@@ -273,6 +274,19 @@ export function ReviewView({ initial }: { initial: ReviewDetail }) {
               </div>
             ))}
           </dl>
+        </section>
+      )}
+
+      {/* FR-062: quiz on the user's own mistakes; the server also enforces "completed" and "has findings". */}
+      {done && review.findings.some((f) => f.status !== "false_positive") && (
+        <section aria-labelledby="quiz-heading" className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card px-5 py-4">
+          <div>
+            <h2 id="quiz-heading" className="font-display text-xl font-bold [font-stretch:90%]">
+              Test what you learned
+            </h2>
+            <p className="text-sm text-muted-foreground">A short quiz built from the mistakes in this file.</p>
+          </div>
+          <QuizModal reviewId={review.id} studentMode={studentMode} />
         </section>
       )}
 
