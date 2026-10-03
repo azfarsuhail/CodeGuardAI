@@ -42,7 +42,7 @@ export async function POST(req: Request) {
       );
 
     const { id, analysis } = await createReview(parsed.data, client, viewer);
-    after(() => completeReview(id, parsed.data, analysis, startedAt));
+    after(() => completeReview(id, parsed.data, analysis, startedAt, viewer?.id ?? null));
     return NextResponse.json({ review_id: id, status: "analyzing" }, { status: 202 });
   } catch (e) {
     console.error("[POST /api/reviews]", e);

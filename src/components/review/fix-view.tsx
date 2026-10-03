@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { ArrowLeft, Check, CircleCheck, Copy, Download, Loader2, Save, TriangleAlert, Wand2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -14,6 +15,7 @@ import { CodeDiff, downloadText, fixedFileName, useWide } from "./code-diff";
 export function FixView({ review }: { review: ReviewDetail }) {
   // The submitted code. Never written to: every fix produces a separate string (FR-051).
   const original = review.original_code;
+  const router = useRouter();
   const findings = review.findings;
   const [selected, setSelected] = useState<Set<string>>(() => defaultSelection(findings));
   const [saving, setSaving] = useState(false);
@@ -52,7 +54,9 @@ export function FixView({ review }: { review: ReviewDetail }) {
       });
       const body = await res.json().catch(() => null);
       if (!res.ok) throw new Error(body?.error?.message ?? `Saving failed (HTTP ${res.status}).`);
-      setSaved(FixVersionDetail.parse(body));
+      const version = FixVersionDetail.parse(body);
+      setSaved(version);
+      if (version.validated) router.refresh(); // fixes earn XP; the header is server-rendered
     } catch (e) {
       setError(e instanceof Error ? e.message : "Saving failed. Try again.");
     } finally {

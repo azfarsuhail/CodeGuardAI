@@ -6,6 +6,7 @@ import type { StaticAnalysis } from "@/lib/analysis";
 import { applyFixes, defaultSelection, isApplicable } from "@/lib/fixes";
 import { STATIC_ONLY_NOTICE, aiReview, improveCode, staticReview, validateFixedCode } from "@/lib/pipeline";
 import type { Viewer } from "@/lib/supabase/server";
+import { syncGamification } from "@/lib/gamification/sync";
 import {
   AppliedChange,
   ConceptPrimer,
@@ -154,7 +155,16 @@ export async function createCompletedReview(args: {
 const SAVE_FAILED_NOTICE = "The AI review finished but couldn't be saved, so this report shows static-analysis results only.";
 
 /** Background stage: AI review, merge and rescore, then replace the static-only report. */
-export async function completeReview(id: string, req: CreateReviewRequest, analysis: StaticAnalysis, startedAt: number) {
+/**
+ * Re-derives XP and badges from the user's facts (idempotent, see src/lib/gamification). Never fails the action
+ * that triggered it: a missed sync is caught up by the next one.
+ */
+async function syncXp(userId: string | null) {
+  if (!userId) return;
+  await syncGamification(userId).catch((e) => console.error(`[gamification] sync failed for ${userId}`, e));
+}
+
+export async function completeReview(id: string, req: CreateReviewRequest, analysis: StaticAnalysis, startedAt: number, userId: string | null = null) {
   const r = await aiReview(req, analysis); // never throws; degrades to static-only itself
   const save = () =>
     prisma.$transaction([
@@ -191,6 +201,7 @@ export async function completeReview(id: string, req: CreateReviewRequest, analy
       })
       .catch((err) => console.error(`[review ${id}] could not mark completed`, err));
   }
+  await syncXp(userId); // +10 review, streak bonus, badges
 }
 
 type FixVersionRow = { id: string; type: "improve" | "fix_safe"; code: string; changeList: unknown; validated: boolean; validationErrors: string[]; createdAt: Date };
@@ -261,6 +272,8 @@ export async function createFixVersion(reviewId: string, viewerId: string | null
       validationErrors: check.errors,
     },
   });
+  // Only validated versions count as fixes (PRD 17.3: XP for verified improvement only).
+  if (row.validated) await syncXp(viewerId);
   return toFixVersionDetail(row);
 }
 
