@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac, randomBytes } from "node:crypto";
-import { authEmail, confirmationLink, verifyHook, type HookPayload } from "./auth-email.ts";
+import { actionLink, authEmail, confirmationLink, siteUrl, verifyHook, type HookPayload } from "./auth-email.ts";
 
 const key = randomBytes(32);
 const secret = `v1,whsec_${key.toString("base64")}`;
@@ -46,4 +46,12 @@ test("emails escape the link and decline actions the app never triggers", () => 
   assert.equal(email.html.includes("<script>"), false);
   assert.match(email.text, /token_hash=abc123/);
   assert.equal(authEmail(payload("email_change", "https://cloudtest.tech")), null);
+});
+
+test("custom-action links use the configured site, never the request host, and carry token_hash", () => {
+  delete process.env.SITE_URL;
+  assert.equal(siteUrl(), "https://cloudtest.tech");
+  const link = new URL(actionLink(siteUrl(), "hash1", "signup", "/dashboard"));
+  assert.equal(link.origin + link.pathname, "https://cloudtest.tech/auth/callback");
+  assert.deepEqual(Object.fromEntries(link.searchParams), { token_hash: "hash1", type: "signup", next: "/dashboard" });
 });

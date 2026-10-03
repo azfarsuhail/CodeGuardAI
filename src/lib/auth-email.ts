@@ -64,6 +64,19 @@ const COPY: Record<string, { subject: string; heading: string; body: string; act
 const escape = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
 /**
+ * Where emailed links point. Never derived from the request's Host header: a spoofed host would put a valid
+ * one-time token into a link to someone else's site.
+ */
+export const siteUrl = () => (process.env.SITE_URL || "https://cloudtest.tech").replace(/\/$/, "");
+
+/** Our callback verifies token_hash server-side, so the link works in any browser. */
+export function actionLink(site: string, tokenHash: string, type: string, next: string): string {
+  const url = new URL("/auth/callback", site);
+  url.search = new URLSearchParams({ token_hash: tokenHash, type, next }).toString();
+  return url.toString();
+}
+
+/**
  * The link goes to our /auth/callback with token_hash, which works in any browser (unlike the PKCE code flow).
  * redirect_to was already checked by Supabase against the allowlist; when it isn't our callback (Supabase fell
  * back to the Site URL), we build the callback on the same origin with the right next page.
@@ -82,9 +95,13 @@ export function confirmationLink(data: HookPayload["email_data"]): string {
 
 /** null for actions this app never triggers (email change, reauthentication): the hook reports an error. */
 export function authEmail(payload: HookPayload): Email | null {
-  const copy = COPY[payload.email_data.email_action_type];
+  return COPY[payload.email_data.email_action_type] ? actionEmail(payload.email_data.email_action_type, payload.user.email, confirmationLink(payload.email_data)) : null;
+}
+
+/** The branded email for one auth action, with its link. */
+export function actionEmail(type: string, to: string, link: string): Email | null {
+  const copy = COPY[type];
   if (!copy) return null;
-  const link = confirmationLink(payload.email_data);
   const html = `<!doctype html><html><body style="margin:0;background:#f3f5f4;font-family:Arial,Helvetica,sans-serif;color:#16202b">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:32px 16px">
 <table role="presentation" width="100%" style="max-width:480px;background:#ffffff;border-radius:12px" cellpadding="0" cellspacing="0"><tr><td style="padding:32px">
@@ -95,5 +112,5 @@ export function authEmail(payload: HookPayload): Email | null {
 <p style="margin:0;font-size:13px;line-height:1.5;color:#55606b">The link works once and expires soon. If you didn't ask for this email, you can ignore it.</p>
 </td></tr></table></td></tr></table></body></html>`;
   const text = `${copy.heading}\n\n${copy.body}\n\n${copy.action}: ${link}\n\nThe link works once and expires soon. If you didn't ask for this email, you can ignore it.`;
-  return { to: payload.user.email, subject: copy.subject, html, text };
+  return { to, subject: copy.subject, html, text };
 }

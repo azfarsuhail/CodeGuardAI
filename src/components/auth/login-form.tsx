@@ -57,14 +57,15 @@ export function LoginForm({ next, initialError, initialMessage }: { next: string
         return;
       }
       if (mode === "sign-up") {
-        const { data, error } = await supabase.auth.signUp({ email, password, options: { emailRedirectTo: callback(next) } });
-        if (error) throw error;
-        if (data.session) {
-          router.replace(next);
-          router.refresh();
-          return;
-        }
-        // FR-002: email verification. The link lands on /auth/callback, which signs the user in.
+        // FR-002: email verification. The server creates the account and emails the link through Resend; the
+        // link lands on /auth/callback, which signs the user in and continues to `next`.
+        const res = await fetch("/api/auth/custom-action", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ type: "signup", email, password, next }),
+        });
+        const body = await res.json().catch(() => null);
+        if (!res.ok) throw new Error(body?.error?.message ?? `Couldn't create the account (HTTP ${res.status}). Try again.`);
         setMessage(`Check ${email} for a link to confirm your account, then come back here.`);
       }
     } catch (err) {

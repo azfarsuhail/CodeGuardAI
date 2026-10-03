@@ -292,3 +292,16 @@ model Metrics {
   spaceComplexity String?
   functions       Json    @default("[]") // FunctionMetric[]
 }
+
+// Auth emails requested through /api/auth/custom-action, kept only to rate-limit that public endpoint.
+// Salted hashes, never the address or IP. Server-only: no API grants (see rls.sql).
+model AuthEmailSend {
+  id         String   @id @default(cuid())
+  kind       String // "signup" | "recovery"
+  emailHash  String
+  clientHash String
+  createdAt  DateTime @default(now())
+
+  @@index([emailHash, createdAt])
+  @@index([clientHash, createdAt])
+}

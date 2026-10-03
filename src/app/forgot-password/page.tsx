@@ -5,10 +5,9 @@ import Link from "next/link";
 import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import { createClient } from "@/lib/supabase/client";
 
-// FR-002 password reset, step 1: email a reset link. Supabase's PKCE flow stores a code verifier in this
-// browser; the link lands on /auth/callback, which exchanges the code and continues to /reset-password.
+// FR-002 password reset, step 1: email a reset link. /api/auth/custom-action generates it and sends it through
+// Resend; the link lands on /auth/callback (token_hash, any browser), which continues to /reset-password.
 export default function ForgotPasswordPage() {
   const [email, setEmail] = useState("");
   const [busy, setBusy] = useState(false);
@@ -19,11 +18,20 @@ export default function ForgotPasswordPage() {
     e.preventDefault();
     setBusy(true);
     setError(null);
-    const redirectTo = `${window.location.origin}/auth/callback?next=${encodeURIComponent("/reset-password")}`;
-    const { error } = await createClient().auth.resetPasswordForEmail(email, { redirectTo });
-    setBusy(false);
-    if (error) return setError(error.message);
-    setSent(true);
+    try {
+      const res = await fetch("/api/auth/custom-action", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "recovery", email }),
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) return setError(body?.error?.message ?? `Couldn't send the reset link (HTTP ${res.status}). Try again.`);
+      setSent(true);
+    } catch {
+      setError("Couldn't reach the server. Check your connection and try again.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -50,7 +58,7 @@ export default function ForgotPasswordPage() {
         <div aria-live="polite">
           {sent && (
             <p className="rounded-xl border border-[#75e0a7] bg-[#ecfdf3] px-4 py-3 text-sm font-bold text-[#05603a]">
-              If an account exists for {email}, a reset link is on its way. Open it in this browser.
+              If an account exists for {email}, a reset link is on its way.
             </p>
           )}
         </div>

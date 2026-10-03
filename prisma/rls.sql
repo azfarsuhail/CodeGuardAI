@@ -14,10 +14,11 @@ ALTER TABLE "XpEvent" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "UserBadge" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "GitHubInstallation" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "PullRequestReview" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "AuthEmailSend" ENABLE ROW LEVEL SECURITY; -- server-only: no grants below, so the API sees nothing
 
 -- Read-only API surface: signed-in users may SELECT (filtered by the policies below); nobody may write via the API.
 REVOKE ALL ON "User", "Review", "Finding", "FixVersion", "Metrics", "Quiz", "QuizAttempt", "XpEvent", "UserBadge",
-  "GitHubInstallation", "PullRequestReview" FROM anon, authenticated;
+  "GitHubInstallation", "PullRequestReview", "AuthEmailSend" FROM anon, authenticated;
 GRANT USAGE ON SCHEMA public TO authenticated;
 GRANT SELECT ON "User", "Review", "Finding", "FixVersion", "Metrics", "Quiz", "QuizAttempt", "XpEvent", "UserBadge",
   "GitHubInstallation", "PullRequestReview" TO authenticated;
