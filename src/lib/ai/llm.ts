@@ -5,6 +5,10 @@ export class LlmUnavailableError extends Error {}
 type Call = (model: string, system: string, user: string, schema: unknown, signal: AbortSignal) => Promise<string>;
 type Provider = { name: string; model: string; call: Call };
 
+// Groq's strict mode validates the model's JSON itself and reports a mismatch as HTTP 400 (json_validate_failed):
+// that is bad output, not a bad request, so it gets the same corrective retry as a Zod failure.
+class InvalidOutputError extends Error {}
+
 class HttpError extends Error {
   readonly status: number;
   readonly retryAfterMs: number | null;
@@ -45,8 +49,13 @@ function providers(): Provider[] {
 async function post(url: string, headers: Record<string, string>, body: unknown, signal: AbortSignal) {
   const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body), signal });
   if (!res.ok) {
-    const retryAfter = Number(res.headers.get("retry-after"));
-    throw new HttpError(res.status, `HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`, retryAfter > 0 ? retryAfter * 1000 : null);
+    const text = await res.text();
+    if (res.status === 400 && /json_validate_failed|does not match the expected schema/.test(text)) {
+      throw new InvalidOutputError(/Error: (jsonschema:[^"]*)/.exec(text)?.[1]?.slice(0, 600) ?? "The JSON did not match the schema.");
+    }
+    // Retry-After header, or Groq's in-body hint ("Please try again in 4.545s").
+    const seconds = Number(res.headers.get("retry-after")) || Number(/try again in ([\d.]+)s/i.exec(text)?.[1]);
+    throw new HttpError(res.status, `HTTP ${res.status}: ${text.slice(0, 300)}`, seconds > 0 ? Math.ceil(seconds * 1000) : null);
   }
   return res.json();
 }
@@ -144,10 +153,19 @@ export async function generateStructured<T>(opts: {
         errors.push(`${label}: out of time`);
         break;
       }
+      const reject = (issue: string) => {
+        errors.push(`${label} attempt ${attempt}: invalid output`);
+        user = `${opts.user}\n\nYour previous response was rejected:\n${issue}\nReturn a corrected JSON object only.`;
+        attempt++;
+      };
       let text: string;
       try {
         text = await p.call(p.model, opts.system, user, schema, AbortSignal.timeout(Math.min(remaining, PER_CALL_TIMEOUT_MS)));
       } catch (e) {
+        if (e instanceof InvalidOutputError) {
+          reject(e.message);
+          continue;
+        }
         errors.push(`${label}: ${e instanceof Error ? e.message : String(e)}`);
         // Network blips ("fetch failed") are as transient as a 503; a stalled call already used its 30 s, so move on.
         const transient = e instanceof HttpError ? TRANSIENT.has(e.status) : !(e instanceof Error && /Timeout|Abort/.test(e.name));
@@ -170,9 +188,7 @@ export async function generateStructured<T>(opts: {
       } catch {
         issue = "The response was not valid JSON.";
       }
-      errors.push(`${label} attempt ${attempt}: invalid output`);
-      user = `${opts.user}\n\nYour previous response was rejected:\n${issue}\nReturn a corrected JSON object only.`;
-      attempt++;
+      reject(issue);
     }
   }
   throw new LlmUnavailableError(errors.join("; "));

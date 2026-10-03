@@ -115,6 +115,23 @@ test("an under-indented fix is shifted to the indentation of the code it replace
   assert.equal(f.fix_code, correct);
 });
 
+test("a fix with only its first line unindented keeps the rest at their absolute depth (seen live)", () => {
+  const lines = analysis.code.split("\n"); // line 6: '    query = "SELECT ..."', line 13: "    return total / len(scores)"
+  const sql = 'query = "SELECT * FROM users WHERE name = ?"\n    return conn.execute(query, (username,)).fetchone()';
+  assert.equal(
+    reindentFix(lines, { start: 6, end: 6 }, sql),
+    '    query = "SELECT * FROM users WHERE name = ?"\n    return conn.execute(query, (username,)).fetchone()',
+  );
+  const guard = "if len(scores) == 0:\n        return 0\n    return total / len(scores)";
+  assert.equal(reindentFix(lines, { start: 13, end: 13 }, guard), "    if len(scores) == 0:\n        return 0\n    return total / len(scores)");
+  // With indentation right, the duplicated `return` after the SQL fix is caught and the fix demoted.
+  const [f] = mergeFindings({
+    code: analysis.code, fileName: "main.py", mode: "developer", staticFindings: [],
+    ai: output([ai({ category: "security", location: { start_line: 6, end_line: 6 }, evidence: "query = ", fix_code: sql })]),
+  });
+  assert.equal(f.fix_safety, "needs_review");
+});
+
 test("a 'safe' fix that would leave unreachable code is demoted to needs_review", () => {
   const lines = analysis.code.split("\n"); // line 6: query = ..., line 7: return conn.execute(query).fetchone()
   const sqlFix = '    query = "SELECT * FROM users WHERE name = ?"\n    return conn.execute(query, (username,)).fetchone()';

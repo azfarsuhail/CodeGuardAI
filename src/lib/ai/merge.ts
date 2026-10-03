@@ -106,11 +106,18 @@ export function reindentFix(lines: string[], loc: { start: number; end: number }
   const target = indentOf(lines[loc.start - 1] ?? "");
   const code = fix.filter((l) => l.trim());
   if (!code.length) return fixCode;
-  const min = Math.min(...code.map((l) => indentOf(l).length));
-  const shift = target.length - min;
+  const pad = (n: number) => (target[0] === "\t" ? "\t" : " ").repeat(n);
+  const [first, ...rest] = code;
+  // Shape 1 (seen live): only the first line lost its indentation; the rest already sit at absolute depth.
+  // Re-indent just that line; shifting everything would push the rest one level too deep.
+  if (rest.length && indentOf(first).length < target.length && Math.min(...rest.map((l) => indentOf(l).length)) >= target.length) {
+    const i = fix.indexOf(first);
+    return fix.map((l, j) => (j === i ? pad(target.length - indentOf(l).length) + l : l)).join("\n");
+  }
+  // Shape 2: the whole block was flattened; shift every line by the same amount.
+  const shift = target.length - Math.min(...code.map((l) => indentOf(l).length));
   if (shift <= 0) return fixCode;
-  const pad = (target[0] === "\t" ? "\t" : " ").repeat(shift);
-  return fix.map((l) => (l.trim() ? pad + l : l)).join("\n");
+  return fix.map((l) => (l.trim() ? pad(shift) + l : l)).join("\n");
 }
 
 /**

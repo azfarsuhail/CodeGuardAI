@@ -88,6 +88,14 @@ test("retries once on schema violation, then falls back", async () => {
   assert.match(JSON.stringify(bodies[1].messages), /previous response was rejected/);
 });
 
+test("Groq's strict-mode schema 400 gets the corrective retry, not a fallback (seen live)", async () => {
+  const failed = '{"error":{"message":"Generated JSON does not match the expected schema. Please adjust your prompt. See \'failed_generation\' for more details. Error: jsonschema: \'/findings/0\' does not validate: missing properties: \'student_explanation\'","type":"invalid_request_error","code":"json_validate_failed"}}';
+  mockFetch({ "api.groq.com": [() => new Response(failed, { status: 400 }), reply('{"answer":"ok"}')] });
+  assert.deepEqual(await run(), { data: { answer: "ok" }, model: "groq:openai/gpt-oss-120b" });
+  assert.deepEqual(calls, ["api.groq.com", "api.groq.com"]);
+  assert.match(JSON.stringify(bodies[1].messages), /missing properties: 'student_explanation'/);
+});
+
 test("a transient 503 gets one back-off retry on the same model", async () => {
   mockFetch({ "api.groq.com": [() => new Response("busy", { status: 503 }), reply("{\"answer\":\"ok\"}")] });
   assert.equal((await run()).data.answer, "ok");
@@ -99,6 +107,14 @@ test("a 429 waits for the provider's Retry-After before retrying", async () => {
   const started = Date.now();
   assert.equal((await run()).data.answer, "ok");
   assert.ok(Date.now() - started >= 950, "should wait ~1 s");
+});
+
+test("a 429 without Retry-After honours Groq's in-body 'try again in Xs' hint", async () => {
+  mockFetch({ "api.groq.com": [() => new Response('{"error":{"message":"Rate limit reached. Please try again in 1.2s."}}', { status: 429 }), reply('{"answer":"ok"}')] });
+  const started = Date.now();
+  assert.equal((await run()).data.answer, "ok");
+  assert.ok(Date.now() - started >= 1150, "should wait ~1.2 s, not the 2 s default");
+  assert.ok(Date.now() - started < 1900);
 });
 
 test("a network failure also gets one back-off retry", async () => {
