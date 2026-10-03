@@ -21,6 +21,10 @@ test("githubConfig needs all three vars and unescapes \\n in the key", () => {
   assert.equal(githubConfig({ GITHUB_APP_ID: "1", GITHUB_APP_PRIVATE_KEY: "k" }), null);
   const cfg = githubConfig({ GITHUB_APP_ID: "1", GITHUB_APP_PRIVATE_KEY: "-----BEGIN-----\\nabc\\n-----END-----", GITHUB_WEBHOOK_SECRET: "s" });
   assert.equal(cfg?.privateKey, "-----BEGIN-----\nabc\n-----END-----");
+  // A secret pasted into Vercel with a trailing newline must still verify GitHub's signatures.
+  const pasted = githubConfig({ GITHUB_APP_ID: "1", GITHUB_APP_PRIVATE_KEY: "k", GITHUB_WEBHOOK_SECRET: "s3cret\n" });
+  const sig = "sha256=" + createHmac("sha256", "s3cret").update("{}").digest("hex");
+  assert.equal(verifySignature(pasted!.webhookSecret, "{}", sig), true);
 });
 
 test("createAppJwt makes a verifiable RS256 JWT with backdated iat and 9 min exp", () => {

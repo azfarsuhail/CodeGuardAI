@@ -9,7 +9,7 @@ export type GitHubConfig = { appId: string; privateKey: string; webhookSecret: s
 export function githubConfig(env: Record<string, string | undefined> = process.env): GitHubConfig | null {
   const appId = env.GITHUB_APP_ID?.trim();
   const privateKey = env.GITHUB_APP_PRIVATE_KEY?.replace(/\\n/g, "\n").trim();
-  const webhookSecret = env.GITHUB_WEBHOOK_SECRET;
+  const webhookSecret = env.GITHUB_WEBHOOK_SECRET?.trim(); // a pasted trailing newline would fail every signature
   return appId && privateKey && webhookSecret ? { appId, privateKey, webhookSecret } : null;
 }
 
