@@ -111,6 +111,46 @@ export async function createReview(req: CreateReviewRequest, clientHash: string 
   return { id: review.id, analysis: s.analysis };
 }
 
+/**
+ * Persists a review that was analysed synchronously (static + AI already done), e.g. one changed file of a
+ * GitHub pull request. One nested write: the review, its findings and metrics.
+ */
+export async function createCompletedReview(args: {
+  req: CreateReviewRequest;
+  analysis: StaticAnalysis;
+  result: Awaited<ReturnType<typeof aiReview>>;
+  userId: string | null;
+  pullRequestReviewId?: string;
+  startedAt: number;
+}) {
+  const { req, analysis, result: r } = args;
+  const review = await prisma.review.create({
+    data: {
+      userId: args.userId,
+      pullRequestReviewId: args.pullRequestReviewId ?? null,
+      language: req.language,
+      mode: req.mode,
+      status: "completed",
+      sourceType: args.pullRequestReviewId ? "github" : req.source_type,
+      fileName: req.file_name,
+      originalCode: analysis.code, // secret-masked
+      focus: req.focus,
+      summary: r.summary,
+      scores: json(r.scores),
+      conceptPrimers: json(r.conceptPrimers),
+      staticOnly: r.model === null,
+      notice: r.notice,
+      model: r.model,
+      promptVersion: r.promptVersion,
+      durationMs: Date.now() - args.startedAt,
+      findings: { createMany: { data: r.findings.map(findingRow) } },
+      metrics: { create: metricsRow(r.metrics) },
+    },
+    select: { id: true },
+  });
+  return review.id;
+}
+
 const SAVE_FAILED_NOTICE = "The AI review finished but couldn't be saved, so this report shows static-analysis results only.";
 
 /** Background stage: AI review, merge and rescore, then replace the static-only report. */
