@@ -6,6 +6,7 @@ import { LANGUAGES } from "./languages.ts";
 import { computeScores } from "./scoring.ts";
 import {
   AiReviewOutput,
+  StudentReviewOutput,
   aiReviewJsonSchema,
   type ConceptPrimer,
   type CreateReviewRequest,
@@ -60,7 +61,7 @@ export async function aiReview(
         staticFindings: analysis.findings,
         metrics: analysis.metrics,
       }),
-      schema: AiReviewOutput,
+      schema: req.mode === "student" ? StudentReviewOutput : AiReviewOutput,
       jsonSchema: aiReviewJsonSchema,
       deadlineMs,
     }));

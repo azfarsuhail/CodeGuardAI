@@ -48,13 +48,48 @@ test("retries once on schema violation, then falls back to the next provider", a
   assert.deepEqual(calls, ["api.groq.com", "api.groq.com", "generativelanguage.googleapis.com"]);
 });
 
-test("HTTP errors skip straight to the fallback; all failing raises LlmUnavailableError", async () => {
+test("a transient 503 gets one back-off retry on the same model", async () => {
+  mockFetch({ "api.groq.com": [() => new Response("high demand", { status: 503 }), groqReply('{"answer":"ok"}')] });
+  assert.equal((await run()).data.answer, "ok");
+  assert.deepEqual(calls, ["api.groq.com", "api.groq.com"]);
+});
+
+test("a 429 waits for the provider's Retry-After before retrying", async () => {
+  mockFetch({ "api.groq.com": [() => new Response("slow down", { status: 429, headers: { "retry-after": "1" } }), groqReply('{"answer":"ok"}')] });
+  const started = Date.now();
+  assert.equal((await run()).data.answer, "ok");
+  assert.ok(Date.now() - started >= 950, "should wait ~1 s");
+});
+
+test("a network failure also gets one back-off retry", async () => {
   mockFetch({
-    "api.groq.com": [() => new Response("rate limited", { status: 429 })],
-    "generativelanguage.googleapis.com": [() => new Response("down", { status: 503 })],
+    "api.groq.com": [
+      () => {
+        throw new TypeError("fetch failed");
+      },
+      groqReply('{"answer":"ok"}'),
+    ],
   });
+  assert.equal((await run()).data.answer, "ok");
+  assert.deepEqual(calls, ["api.groq.com", "api.groq.com"]);
+});
+
+test("auth errors skip straight to the next provider; Gemini overload falls back to the lite model", async () => {
+  const overloaded = () => new Response("high demand", { status: 503 });
+  mockFetch({
+    "api.groq.com": [() => new Response("Invalid API Key", { status: 401 })],
+    "generativelanguage.googleapis.com": [overloaded, overloaded, geminiReply('{"answer":"lite"}')],
+  });
+  const out = await run();
+  assert.equal(out.model, "gemini:gemini-3.5-flash-lite");
+  assert.deepEqual(calls, ["api.groq.com", ...Array(3).fill("generativelanguage.googleapis.com")]);
+});
+
+test("everything failing raises LlmUnavailableError", async () => {
+  const down = () => new Response("down", { status: 400 });
+  mockFetch({ "api.groq.com": [down], "generativelanguage.googleapis.com": [down, down] });
   await assert.rejects(run(), LlmUnavailableError);
-  assert.deepEqual(calls, ["api.groq.com", "generativelanguage.googleapis.com"]);
+  assert.equal(calls.length, 3);
 });
 
 test("no provider configured is reported as unavailable", async () => {

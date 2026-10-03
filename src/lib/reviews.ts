@@ -78,7 +78,7 @@ export async function createReview(req: CreateReviewRequest, clientHash: string 
       intendedBehaviour: req.intended_behaviour ?? null,
       scores: json(s.scores),
       clientHash,
-      findings: { create: s.findings.map(findingRow) },
+      findings: { createMany: { data: s.findings.map(findingRow) } }, // one INSERT, not one per finding
       metrics: { create: metricsRow(s.metrics) },
     },
     select: { id: true },
@@ -86,11 +86,13 @@ export async function createReview(req: CreateReviewRequest, clientHash: string 
   return { id: review.id, analysis: s.analysis };
 }
 
+const SAVE_FAILED_NOTICE = "The AI review finished but couldn't be saved, so this report shows static-analysis results only.";
+
 /** Background stage: AI review, merge and rescore, then replace the static-only report. */
 export async function completeReview(id: string, req: CreateReviewRequest, analysis: StaticAnalysis, startedAt: number) {
-  try {
-    const r = await aiReview(req, analysis);
-    await prisma.$transaction([
+  const r = await aiReview(req, analysis); // never throws; degrades to static-only itself
+  const save = () =>
+    prisma.$transaction([
       prisma.finding.deleteMany({ where: { reviewId: id } }),
       prisma.finding.createMany({ data: r.findings.map((f) => ({ reviewId: id, ...findingRow(f) })) }),
       prisma.metrics.update({ where: { reviewId: id }, data: metricsRow(r.metrics) }),
@@ -109,11 +111,19 @@ export async function completeReview(id: string, req: CreateReviewRequest, analy
         },
       }),
     ]);
+  try {
+    await save().catch((e) => {
+      console.warn(`[review ${id}] save failed, retrying once`, e instanceof Error ? e.message : e);
+      return save();
+    });
   } catch (e) {
     // The stored static-only report is still valid; surface it rather than leaving the review stuck.
     console.error(`[review ${id}] completion failed`, e);
     await prisma.review
-      .update({ where: { id }, data: { status: "completed", staticOnly: true, notice: STATIC_ONLY_NOTICE, durationMs: Date.now() - startedAt } })
+      .update({
+        where: { id },
+        data: { status: "completed", staticOnly: true, notice: r.model ? SAVE_FAILED_NOTICE : STATIC_ONLY_NOTICE, durationMs: Date.now() - startedAt },
+      })
       .catch((err) => console.error(`[review ${id}] could not mark completed`, err));
   }
 }

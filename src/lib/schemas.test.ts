@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { AiReviewOutput, CreateReviewRequest, aiReviewJsonSchema, aiFixJsonSchema } from "./schemas.ts";
+import { AiReviewOutput, CreateReviewRequest, StudentReviewOutput, aiReviewJsonSchema, aiFixJsonSchema } from "./schemas.ts";
 
 test("request applies defaults and enforces PRD limits", () => {
   const ok = CreateReviewRequest.parse({ code: "def f(a, b):\n    return a / b\n", language: "python", mode: "student" });
@@ -29,6 +29,15 @@ test("LLM review output validates and rejects malformed findings", () => {
   assert.equal(AiReviewOutput.safeParse(output).success, true);
   assert.equal(AiReviewOutput.safeParse({ ...output, findings: [{ ...finding, confidence: 1.5 }] }).success, false);
   assert.equal(AiReviewOutput.safeParse({ ...output, findings: [{ ...finding, fix_safety: "yolo" }] }).success, false);
+
+  // Student mode additionally requires primers and per-finding explanations.
+  assert.equal(StudentReviewOutput.safeParse(output).success, false);
+  const primers = [{ concept: "Division", explanation: "Dividing by zero is undefined." }];
+  assert.equal(StudentReviewOutput.safeParse({ ...output, concept_primers: primers }).success, true);
+  assert.equal(
+    StudentReviewOutput.safeParse({ ...output, concept_primers: primers, findings: [{ ...finding, student_explanation: null }] }).success,
+    false,
+  );
 });
 
 test("JSON Schemas are strict enough for structured-output APIs", () => {

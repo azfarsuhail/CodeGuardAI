@@ -75,6 +75,16 @@ test("AI complexity estimates attach to analyzer functions", () => {
   const fn = m.functions.find((f) => f.name === "has_duplicates")!;
   assert.equal(fn.suggestion, "use a set");
   assert.equal(m.functions.find((f) => f.name === "average")!.time_complexity, null);
+
+  // Tolerates signatures/qualified names and falls back to line ranges.
+  const loose = output([]).complexity;
+  loose.functions = [
+    { ...loose.functions[0], name: "has_duplicates(items)" },
+    { ...loose.functions[0], name: "Average", start_line: 9, end_line: 13, time_complexity: "O(n)" },
+  ];
+  const m2 = mergeMetrics(analysis.metrics, loose);
+  assert.equal(m2.functions.find((f) => f.name === "has_duplicates")!.time_complexity, "O(n^2)");
+  assert.equal(m2.functions.find((f) => f.name === "average")!.time_complexity, "O(n)");
 });
 
 test("prompt fences untrusted input with a per-request nonce and numbers lines", () => {

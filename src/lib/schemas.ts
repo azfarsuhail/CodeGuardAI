@@ -128,6 +128,17 @@ export const AiReviewOutput = z.object({
   concept_primers: z.array(ConceptPrimer).max(5).describe("Student mode only; empty array in developer mode"),
 });
 
+// Student Mode is a Must (FR-061): output missing primers or explanations is rejected, which triggers the
+// LLM client's corrective retry. The JSON Schema sent to providers stays the same for both modes.
+export const StudentReviewOutput = AiReviewOutput.superRefine((o, ctx) => {
+  if (o.concept_primers.length === 0)
+    ctx.addIssue({ code: "custom", path: ["concept_primers"], message: "Student mode needs 1 to 5 concept primers." });
+  o.findings.forEach((f, i) => {
+    if (!f.student_explanation?.trim())
+      ctx.addIssue({ code: "custom", path: ["findings", i, "student_explanation"], message: "Student mode needs a student_explanation for every finding." });
+  });
+});
+
 // ---------------------------------------------------------------------------
 // LLM structured output: fix / improve pass (PRD 8.6).
 // ---------------------------------------------------------------------------

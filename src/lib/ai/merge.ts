@@ -145,7 +145,10 @@ export function mergeFindings(args: {
     .map((f, i) => ({ id: `F-${String(i + 1).padStart(4, "0")}`, ...f }));
 }
 
-// Attach the AI's Big-O estimates to the analyzer's per-function metrics.
+// Models write "find_duplicates(items)" or "UserService.find"; compare bare identifiers.
+const bareName = (n: string) => n.replace(/\([\s\S]*$/, "").split(".").pop()!.trim();
+
+// Attach the AI's Big-O estimates to the analyzer's per-function metrics, matching by name or by line range.
 export function mergeMetrics(metrics: StaticMetrics, complexity: AiReviewOutput["complexity"] | null): ReviewMetrics {
   return {
     ...metrics,
@@ -153,7 +156,7 @@ export function mergeMetrics(metrics: StaticMetrics, complexity: AiReviewOutput[
     space_complexity: complexity?.space_complexity ?? null,
     functions: metrics.functions.map((f) => {
       const c = complexity?.functions
-        .filter((c) => c.name === f.name)
+        .filter((c) => bareName(c.name) === f.name || (c.start_line >= f.start_line && c.start_line <= f.end_line))
         .sort((a, b) => Math.abs(a.start_line - f.start_line) - Math.abs(b.start_line - f.start_line))[0];
       return {
         ...f,

@@ -5,19 +5,44 @@ export class LlmUnavailableError extends Error {}
 type Call = (model: string, system: string, user: string, schema: unknown, signal: AbortSignal) => Promise<string>;
 type Provider = { name: string; model: string; call: Call };
 
-class HttpError extends Error {}
+class HttpError extends Error {
+  readonly status: number;
+  readonly retryAfterMs: number | null;
+  constructor(status: number, message: string, retryAfterMs: number | null) {
+    super(message);
+    this.status = status;
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+// Rate limits and overload ("high demand") are usually momentary: worth one short back-off on the same model.
+// Free tiers are tight (Groq: 8K tokens/min), so honour the provider's Retry-After when it's short.
+const TRANSIENT = new Set([429, 500, 502, 503, 504]);
+const BACKOFF_MS = 2000;
+const MAX_BACKOFF_MS = 10_000;
+const MAX_OUTPUT_TOKENS = 8192;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // Groq first: its API terms exclude customer data from training (PRD 18). Gemini's free tier does not.
+// Overload is per model, so a lighter Gemini model is the last resort before static-only results.
 function providers(): Provider[] {
   const list: Provider[] = [];
   if (process.env.GROQ_API_KEY) list.push({ name: "groq", model: process.env.GROQ_MODEL || "openai/gpt-oss-120b", call: callGroq });
-  if (process.env.GEMINI_API_KEY) list.push({ name: "gemini", model: process.env.GEMINI_MODEL || "gemini-3.6-flash", call: callGemini });
+  if (process.env.GEMINI_API_KEY) {
+    const primary = process.env.GEMINI_MODEL || "gemini-3.6-flash";
+    const fallback = process.env.GEMINI_FALLBACK_MODEL || "gemini-3.5-flash-lite";
+    list.push({ name: "gemini", model: primary, call: callGemini });
+    if (fallback !== primary) list.push({ name: "gemini", model: fallback, call: callGemini });
+  }
   return list;
 }
 
 async function post(url: string, headers: Record<string, string>, body: unknown, signal: AbortSignal) {
   const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body), signal });
-  if (!res.ok) throw new HttpError(`HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  if (!res.ok) {
+    const retryAfter = Number(res.headers.get("retry-after"));
+    throw new HttpError(res.status, `HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`, retryAfter > 0 ? retryAfter * 1000 : null);
+  }
   return res.json();
 }
 
@@ -29,7 +54,7 @@ const callGroq: Call = async (model, system, user, schema, signal) => {
     {
       model,
       temperature: 0.2,
-      max_completion_tokens: 16384,
+      max_completion_tokens: MAX_OUTPUT_TOKENS,
       ...(reasoning ? { reasoning_effort: "low" } : {}),
       messages: [
         { role: "system", content: system },
@@ -52,7 +77,7 @@ const callGemini: Call = async (model, system, user, schema, signal) => {
       contents: [{ role: "user", parts: [{ text: user }] }],
       generationConfig: {
         temperature: 0.2,
-        maxOutputTokens: 16384,
+        maxOutputTokens: MAX_OUTPUT_TOKENS,
         responseMimeType: "application/json",
         responseJsonSchema: schema,
         // Gemini 3.x: low thinking keeps a review inside the 30 s budget (PRD 9).
@@ -98,31 +123,46 @@ export async function generateStructured<T>(opts: {
   const errors: string[] = [];
 
   for (const p of list) {
+    const label = `${p.name}:${p.model}`;
     let user = opts.user;
-    // Second attempt only for malformed output; HTTP/network failures move straight to the next provider.
-    for (let attempt = 1; attempt <= 2; attempt++) {
+    let backoffs = 1;
+    // A second attempt for malformed output, one back-off for transient HTTP errors; anything else
+    // (bad key, bad request, network failure) moves straight to the next provider.
+    for (let attempt = 1; attempt <= 2; ) {
       const remaining = deadline - Date.now();
       if (remaining < 3000) {
-        errors.push(`${p.name}: out of time`);
+        errors.push(`${label}: out of time`);
         break;
       }
       let text: string;
       try {
         text = await p.call(p.model, opts.system, user, schema, AbortSignal.timeout(remaining));
       } catch (e) {
-        errors.push(`${p.name}: ${e instanceof Error ? e.message : String(e)}`);
+        errors.push(`${label}: ${e instanceof Error ? e.message : String(e)}`);
+        // Network blips ("fetch failed") are as transient as a 503; a timeout means the deadline is spent.
+        const transient = e instanceof HttpError ? TRANSIENT.has(e.status) : !(e instanceof Error && /Timeout|Abort/.test(e.name));
+        const wait = Math.min(MAX_BACKOFF_MS, (e instanceof HttpError && e.retryAfterMs) || BACKOFF_MS);
+        if (transient && backoffs-- > 0 && deadline - Date.now() > wait + 5000) {
+          await sleep(wait);
+          continue;
+        }
         break;
       }
       let issue: string;
       try {
         const result = opts.schema.safeParse(JSON.parse(unfence(text)));
-        if (result.success) return { data: result.data, model: `${p.name}:${p.model}` };
-        issue = z.prettifyError(result.error).slice(0, 2000);
+        if (result.success) {
+          // Retry/fallback rates are an operational metric (PRD 19.2); log what it took to get here.
+          if (errors.length) console.warn(`[llm] served by ${label} after: ${errors.join("; ").slice(0, 1000)}`);
+          return { data: result.data, model: label };
+        }
+        issue = z.prettifyError(result.error).slice(0, 600); // short: the retry must fit the same token budget
       } catch {
         issue = "The response was not valid JSON.";
       }
-      errors.push(`${p.name} attempt ${attempt}: invalid output`);
+      errors.push(`${label} attempt ${attempt}: invalid output`);
       user = `${opts.user}\n\nYour previous response was rejected:\n${issue}\nReturn a corrected JSON object only.`;
+      attempt++;
     }
   }
   throw new LlmUnavailableError(errors.join("; "));
