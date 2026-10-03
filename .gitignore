@@ -50,3 +50,6 @@ next-env.d.ts
 
 # browser test artifacts
 /.playwright-mcp/
+
+# editor tooling
+/.serena/

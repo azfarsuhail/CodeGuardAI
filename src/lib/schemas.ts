@@ -34,6 +34,9 @@ export const StaticFinding = z.object({
   severity: Severity,
   start_line: line,
   end_line: line,
+  cwe: z.string().nullable(),
+  fix_safety: FixSafety,
+  fix_hint: z.string().nullable(),
 });
 
 export const StaticFunctionMetric = z.object({
@@ -74,7 +77,7 @@ export const CreateReviewRequest = z.object({
 // ---------------------------------------------------------------------------
 
 export const AiFinding = z.object({
-  id: z.string().regex(/^F-\d{4}$/).describe('Sequential id, e.g. "F-0001"'),
+  id: z.string().max(20).describe('Sequential id, e.g. "F-0001"'), // renumbered server-side
   static_ref: z
     .string()
     .nullable()
@@ -90,7 +93,7 @@ export const AiFinding = z.object({
   fix_code: z.string().max(4000).nullable().describe("Replacement code for start_line..end_line, or null"),
   fix_safety: FixSafety,
   confidence: z.number().min(0).max(1),
-  cwe: z.string().regex(/^CWE-\d+$/).nullable(),
+  cwe: z.string().max(80).nullable().describe('e.g. "CWE-89", or null'), // normalised server-side
   owasp: z.string().max(80).nullable().describe('OWASP Top 10 category, e.g. "A03:2021 Injection", or null'),
   student_explanation: z
     .string()
@@ -177,6 +180,44 @@ export const ScoreReport = z.object({
   security_capped: z.boolean().describe("A critical security finding capped Security at 60"),
 });
 
+export const FunctionMetric = StaticFunctionMetric.extend({
+  time_complexity: z.string().nullable(),
+  space_complexity: z.string().nullable(),
+  explanation: z.string().nullable(),
+  suggestion: z.string().nullable(),
+});
+
+export const ReviewMetrics = StaticMetrics.extend({
+  time_complexity: z.string().nullable(),
+  space_complexity: z.string().nullable(),
+  functions: z.array(FunctionMetric),
+});
+
+export const ReviewStatus = z.enum(["queued", "analyzing", "completed", "failed"]);
+
+// GET /api/reviews/{id} response.
+export const ReviewDetail = z.object({
+  id: z.string(),
+  status: ReviewStatus,
+  language: Language,
+  mode: ReviewMode,
+  file_name: z.string(),
+  source_type: z.enum(["paste", "upload", "github"]),
+  original_code: z.string().describe("Secrets are masked"),
+  focus: z.array(FocusArea),
+  summary: z.string().nullable(),
+  scores: ScoreReport.nullable(),
+  metrics: ReviewMetrics.nullable(),
+  findings: z.array(Finding),
+  concept_primers: z.array(ConceptPrimer),
+  static_only: z.boolean(),
+  notice: z.string().nullable(),
+  model: z.string().nullable(),
+  prompt_version: z.string().nullable(),
+  duration_ms: z.int().nullable(),
+  created_at: z.string(),
+});
+
 export type Language = z.infer<typeof Language>;
 export type ReviewMode = z.infer<typeof ReviewMode>;
 export type FocusArea = z.infer<typeof FocusArea>;
@@ -198,6 +239,10 @@ export type FixChange = z.infer<typeof FixChange>;
 export type AiFixOutput = z.infer<typeof AiFixOutput>;
 export type Finding = z.infer<typeof Finding>;
 export type ScoreReport = z.infer<typeof ScoreReport>;
+export type FunctionMetric = z.infer<typeof FunctionMetric>;
+export type ReviewMetrics = z.infer<typeof ReviewMetrics>;
+export type ReviewStatus = z.infer<typeof ReviewStatus>;
+export type ReviewDetail = z.infer<typeof ReviewDetail>;
 
 // JSON Schemas handed to Gemini (responseJsonSchema) / Groq (response_format.json_schema).
 export const aiReviewJsonSchema = z.toJSONSchema(AiReviewOutput);

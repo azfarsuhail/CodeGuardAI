@@ -111,7 +111,8 @@ model Review {
   scores            Json? // ScoreReport
   conceptPrimers    Json? // ConceptPrimer[] (Student Mode)
   staticOnly        Boolean      @default(false) // LLM unavailable, static results only
-  errorMessage      String?
+  notice            String? // user-facing note, e.g. why results are static-only
+  clientHash        String? // salted hash of the client IP, for guest rate limiting (never the raw IP)
   model             String?
   promptVersion     String?
   durationMs        Int?
@@ -122,6 +123,7 @@ model Review {
   metrics           Metrics?
 
   @@index([userId, createdAt(sort: Desc)])
+  @@index([clientHash, createdAt])
 }
 
 model Finding {
