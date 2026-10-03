@@ -83,47 +83,75 @@ enum FixType {
   fix_safe
 }
 
+// Phase 2 gamification (PRD 17). XP is an append-only ledger: one row per award, deduplicated by
+// (userId, kind, sourceId), so re-running an award is a no-op and totals can't drift.
+enum XpKind {
+  review_completed // +10, sourceId = reviewId
+  bug_fixed // +15, sourceId = "<reviewId>:<findingRef>"
+  security_resolved // +25, sourceId = "<reviewId>:<findingRef>"
+  quiz_correct // +5, sourceId = "<quizAttemptId>:<questionIndex>"
+  streak_bonus // 5-20, sourceId = UTC date "YYYY-MM-DD"
+}
+
+enum BadgeCode {
+  first_bug_fixed
+  security_beginner
+  performance_optimizer
+  bug_hunter
+  streak_keeper
+  quiz_master
+}
+
 // id mirrors Supabase auth.users.id.
 model User {
-  id             String     @id @db.Uuid
-  email          String     @unique
-  name           String?
-  role           UserRole   @default(developer)
-  modePreference ReviewMode @default(developer)
-  createdAt      DateTime   @default(now())
-  reviews        Review[]
+  id                  String               @id @db.Uuid
+  email               String               @unique
+  name                String?
+  role                UserRole             @default(developer)
+  modePreference      ReviewMode           @default(developer)
+  createdAt           DateTime             @default(now())
+  reviews             Review[]
+  quizAttempts        QuizAttempt[]
+  xpEvents            XpEvent[]
+  badges              UserBadge[]
+  githubInstallations GitHubInstallation[]
 }
 
 model Review {
-  id                String       @id @default(cuid())
-  userId            String?      @db.Uuid // null = guest review (FR-003)
-  user              User?        @relation(fields: [userId], references: [id], onDelete: Cascade)
-  language          Language
-  mode              ReviewMode
-  status            ReviewStatus @default(queued)
-  sourceType        SourceType   @default(paste)
-  fileName          String       @default("main")
-  originalCode      String       @db.Text // immutable; fixes live in FixVersion
-  focus             String[]     @default([])
-  assignmentContext String?      @db.Text
-  intendedBehaviour String?      @db.Text
-  summary           String?      @db.Text
-  scores            Json? // ScoreReport
-  conceptPrimers    Json? // ConceptPrimer[] (Student Mode)
-  staticOnly        Boolean      @default(false) // LLM unavailable, static results only
-  notice            String? // user-facing note, e.g. why results are static-only
-  clientHash        String? // salted hash of the client IP, for guest rate limiting (never the raw IP)
-  model             String?
-  promptVersion     String?
-  durationMs        Int?
-  createdAt         DateTime     @default(now())
-  updatedAt         DateTime     @updatedAt
-  findings          Finding[]
-  fixVersions       FixVersion[]
-  metrics           Metrics?
+  id                  String             @id @default(cuid())
+  userId              String?            @db.Uuid // null = guest review (FR-003)
+  user                User?              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  language            Language
+  mode                ReviewMode
+  status              ReviewStatus       @default(queued)
+  sourceType          SourceType         @default(paste)
+  fileName            String             @default("main")
+  originalCode        String             @db.Text // immutable; fixes live in FixVersion
+  focus               String[]           @default([])
+  assignmentContext   String?            @db.Text
+  intendedBehaviour   String?            @db.Text
+  summary             String?            @db.Text
+  scores              Json? // ScoreReport
+  conceptPrimers      Json? // ConceptPrimer[] (Student Mode)
+  staticOnly          Boolean            @default(false) // LLM unavailable, static results only
+  notice              String? // user-facing note, e.g. why results are static-only
+  clientHash          String? // salted hash of the client IP, for guest rate limiting (never the raw IP)
+  model               String?
+  promptVersion       String?
+  durationMs          Int?
+  // Phase 3: set when the review was created for one changed file of a GitHub pull request.
+  pullRequestReviewId String?
+  pullRequestReview   PullRequestReview? @relation(fields: [pullRequestReviewId], references: [id], onDelete: Cascade)
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+  findings            Finding[]
+  fixVersions         FixVersion[]
+  metrics             Metrics?
+  quizzes             Quiz[]
 
   @@index([userId, createdAt(sort: Desc)])
   @@index([clientHash, createdAt])
+  @@index([pullRequestReviewId])
 }
 
 model Finding {
@@ -169,6 +197,87 @@ model FixVersion {
   createdAt        DateTime @default(now())
 
   @@index([reviewId, createdAt])
+}
+
+// FR-062: a quiz generated from one review's findings.
+model Quiz {
+  id        String        @id @default(cuid())
+  reviewId  String
+  review    Review        @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  questions Json // QuizQuestion[] (src/lib/quiz), including the correct answers: never sent to the client before submission
+  model     String?
+  createdAt DateTime      @default(now())
+  attempts  QuizAttempt[]
+
+  @@index([reviewId, createdAt])
+}
+
+model QuizAttempt {
+  id        String   @id @default(cuid())
+  quizId    String
+  quiz      Quiz     @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  userId    String?  @db.Uuid // null for guests
+  user      User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  answers   Json // number[]: chosen option index per question
+  correct   Int
+  total     Int
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([quizId])
+}
+
+model XpEvent {
+  id        String   @id @default(cuid())
+  userId    String   @db.Uuid
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind      XpKind
+  sourceId  String
+  points    Int
+  createdAt DateTime @default(now())
+
+  @@unique([userId, kind, sourceId])
+  @@index([userId, createdAt])
+}
+
+model UserBadge {
+  id        String    @id @default(cuid())
+  userId    String    @db.Uuid
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  badge     BadgeCode
+  awardedAt DateTime  @default(now())
+
+  @@unique([userId, badge])
+}
+
+// Phase 3: GitHub App installations and the pull requests reviewed through them.
+model GitHubInstallation {
+  id                 String              @id @default(cuid())
+  installationId     BigInt              @unique
+  accountLogin       String
+  userId             String?             @db.Uuid // optional link to a CodeGuard account
+  user               User?               @relation(fields: [userId], references: [id], onDelete: SetNull)
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  pullRequestReviews PullRequestReview[]
+}
+
+model PullRequestReview {
+  id             String             @id @default(cuid())
+  installationId BigInt
+  installation   GitHubInstallation @relation(fields: [installationId], references: [installationId], onDelete: Cascade)
+  repo           String // "owner/name"
+  prNumber       Int
+  headSha        String
+  status         String             @default("pending") // pending | completed | failed
+  commentsPosted Int                @default(0)
+  checkRunId     BigInt?
+  error          String?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+  reviews        Review[] // one Review per changed file
+
+  @@unique([repo, prNumber, headSha])
 }
 
 model Metrics {

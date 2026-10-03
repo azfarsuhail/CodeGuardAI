@@ -8,11 +8,46 @@ ALTER TABLE "Review" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "Finding" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "FixVersion" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "Metrics" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "Quiz" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "QuizAttempt" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "XpEvent" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "UserBadge" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "GitHubInstallation" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "PullRequestReview" ENABLE ROW LEVEL SECURITY;
 
 -- Read-only API surface: signed-in users may SELECT (filtered by the policies below); nobody may write via the API.
-REVOKE ALL ON "User", "Review", "Finding", "FixVersion", "Metrics" FROM anon, authenticated;
+REVOKE ALL ON "User", "Review", "Finding", "FixVersion", "Metrics", "Quiz", "QuizAttempt", "XpEvent", "UserBadge",
+  "GitHubInstallation", "PullRequestReview" FROM anon, authenticated;
 GRANT USAGE ON SCHEMA public TO authenticated;
-GRANT SELECT ON "User", "Review", "Finding", "FixVersion", "Metrics" TO authenticated;
+GRANT SELECT ON "User", "Review", "Finding", "FixVersion", "Metrics", "Quiz", "QuizAttempt", "XpEvent", "UserBadge",
+  "GitHubInstallation", "PullRequestReview" TO authenticated;
+
+DROP POLICY IF EXISTS "Users read quizzes of their own reviews" ON "Quiz";
+CREATE POLICY "Users read quizzes of their own reviews" ON "Quiz"
+  FOR SELECT TO authenticated
+  USING (EXISTS (SELECT 1 FROM "Review" r WHERE r.id = "Quiz"."reviewId" AND r."userId" = (SELECT auth.uid())));
+
+DROP POLICY IF EXISTS "Users read their own quiz attempts" ON "QuizAttempt";
+CREATE POLICY "Users read their own quiz attempts" ON "QuizAttempt"
+  FOR SELECT TO authenticated USING ("userId" = (SELECT auth.uid()));
+
+DROP POLICY IF EXISTS "Users read their own XP" ON "XpEvent";
+CREATE POLICY "Users read their own XP" ON "XpEvent"
+  FOR SELECT TO authenticated USING ("userId" = (SELECT auth.uid()));
+
+DROP POLICY IF EXISTS "Users read their own badges" ON "UserBadge";
+CREATE POLICY "Users read their own badges" ON "UserBadge"
+  FOR SELECT TO authenticated USING ("userId" = (SELECT auth.uid()));
+
+DROP POLICY IF EXISTS "Users read their own GitHub installations" ON "GitHubInstallation";
+CREATE POLICY "Users read their own GitHub installations" ON "GitHubInstallation"
+  FOR SELECT TO authenticated USING ("userId" = (SELECT auth.uid()));
+
+DROP POLICY IF EXISTS "Users read PR reviews of their installations" ON "PullRequestReview";
+CREATE POLICY "Users read PR reviews of their installations" ON "PullRequestReview"
+  FOR SELECT TO authenticated
+  USING (EXISTS (SELECT 1 FROM "GitHubInstallation" g
+                 WHERE g."installationId" = "PullRequestReview"."installationId" AND g."userId" = (SELECT auth.uid())));
 
 DROP POLICY IF EXISTS "Users read their own profile" ON "User";
 CREATE POLICY "Users read their own profile" ON "User"
@@ -39,7 +74,8 @@ CREATE POLICY "Users read metrics of their own reviews" ON "Metrics"
 
 -- FR-004 backstop: tie app profiles to Supabase auth users, so deleting an auth user anywhere (including the
 -- Supabase dashboard) also deletes the profile, which cascades to Review -> Finding / FixVersion / Metrics.
--- Not in schema.prisma (Prisma can't reference the auth schema), so db push drops it and this re-adds it.
+-- Not in schema.prisma (Prisma can't reference the auth schema, and its introspection refuses to run while this
+-- exists), so `npm run db:push` drops it first (prisma/pre-push.sql) and this re-adds it.
 -- NOT VALID: enforce for new rows without failing on any pre-existing orphaned profile.
 DO $$
 BEGIN
