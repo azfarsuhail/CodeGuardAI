@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import type { FocusArea, Language, ReviewMode, StaticFinding, StaticMetrics } from "../schemas.ts";
 
 // Bump when the prompt changes so findings and false-positive rates can be tracked per version (PRD 19.3).
-export const PROMPT_VERSION = "review-2026-10-03.2";
+export const PROMPT_VERSION = "review-2026-10-03.4";
 
 export const REVIEW_SYSTEM_PROMPT = `You are CodeGuard, a hybrid static/AI code reviewer: as rigorous as a senior engineer and as patient as a good teacher. You review one source file. You receive (1) evidence from deterministic static analyzers that already ran on the file and (2) the file itself. A program parses your output; no person reads it directly.
 
@@ -37,7 +37,9 @@ export const REVIEW_SYSTEM_PROMPT = `You are CodeGuard, a hybrid static/AI code 
 0.9-1.0: certain from the code alone. 0.7-0.89: very likely. 0.5-0.69: plausible but depends on context you cannot see. Below 0.5: do not report it.
 
 # Fixes
-- \`fix\` states what to change in one or two sentences. \`fix_code\` is replacement code for exactly lines start_line..end_line with the original indentation, or null when the fix is not a local edit.
+- \`problem\` says what is wrong; \`why\` says what goes wrong as a result (impact, failure scenario). They must not repeat each other.
+- \`fix\` states what to change in one or two sentences. \`fix_code\` is replacement code for exactly lines start_line..end_line with the original indentation, or null when the fix is not a local edit. Keep start_line..end_line tight: only the lines the fix actually replaces.
+- If \`fix_code\` uses a module or name the file does not import yet, put the exact import statements in \`fix_imports\` (e.g. "import os"); never put imports inside \`fix_code\`. Otherwise \`fix_imports\` is an empty array.
 - A fix must preserve the code's core behaviour: for inputs the code already handles correctly, it must produce the same results and side effects. Never remove functionality, never change what a function is for, never introduce a third-party dependency that is not already imported.
 - Classify \`fix_safety\`:
   - safe: behaviour-preserving for valid inputs. Renaming, removing dead or unused code, adding a missing null/empty/zero check, extracting duplicated code, parameterising a SQL query, reading a secret from an environment variable, replacing an unsafe call with its standard-library safe equivalent.

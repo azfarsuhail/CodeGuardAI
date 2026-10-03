@@ -21,12 +21,18 @@ const TRANSIENT = new Set([429, 500, 502, 503, 504]);
 const BACKOFF_MS = 2000;
 const MAX_BACKOFF_MS = 10_000;
 const MAX_OUTPUT_TOKENS = 8192;
+// No single attempt may starve the tiers after it (a stalled free endpoint otherwise eats the whole deadline).
+const PER_CALL_TIMEOUT_MS = 30_000;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// Groq first: its API terms exclude customer data from training (PRD 18). Gemini's free tier does not.
-// Overload is per model, so a lighter Gemini model is the last resort before static-only results.
+// 3-tier cascade: OpenRouter -> Groq -> Gemini (Gemini overload falls back to its lite model).
+// Privacy (PRD 18): OpenRouter's :free routes and Gemini's free tier may train on prompts; Groq's API terms
+// don't. OPENROUTER_ZDR=true restricts OpenRouter to zero-retention, no-training endpoints (free models then
+// have none, so requests fall through to Groq).
 function providers(): Provider[] {
   const list: Provider[] = [];
+  if (process.env.OPENROUTER_API_KEY)
+    list.push({ name: "openrouter", model: process.env.OPENROUTER_MODEL || "nvidia/nemotron-3-super-120b-a12b:free", call: callOpenRouter });
   if (process.env.GROQ_API_KEY) list.push({ name: "groq", model: process.env.GROQ_MODEL || "openai/gpt-oss-120b", call: callGroq });
   if (process.env.GEMINI_API_KEY) {
     const primary = process.env.GEMINI_MODEL || "gemini-3.6-flash";
@@ -46,27 +52,60 @@ async function post(url: string, headers: Record<string, string>, body: unknown,
   return res.json();
 }
 
-const callGroq: Call = async (model, system, user, schema, signal) => {
+// OpenAI-compatible chat completions (Groq, OpenRouter): same message + json_schema response_format shape.
+async function chatCompletion(url: string, apiKey: string, payload: Record<string, unknown>, signal: AbortSignal) {
+  const body = await post(url, { Authorization: `Bearer ${apiKey}` }, payload, signal);
+  // OpenRouter can report upstream failures inside a 200 body.
+  if (body.error) throw new HttpError(Number(body.error.code) || 502, `upstream: ${String(body.error.message).slice(0, 300)}`, null);
+  const choice = body.choices?.[0];
+  if (choice?.finish_reason === "length") throw new Error("output truncated (finish_reason length)");
+  return (choice?.message?.content as string | undefined) ?? "";
+}
+
+const messages = (system: string, user: string) => [
+  { role: "system", content: system },
+  { role: "user", content: user },
+];
+
+const callGroq: Call = (model, system, user, schema, signal) => {
   const reasoning = model.startsWith("openai/gpt-oss");
-  const body = await post(
+  return chatCompletion(
     "https://api.groq.com/openai/v1/chat/completions",
-    { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+    process.env.GROQ_API_KEY!,
     {
       model,
       temperature: 0.2,
       max_completion_tokens: MAX_OUTPUT_TOKENS,
       ...(reasoning ? { reasoning_effort: "low" } : {}),
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: user },
-      ],
+      messages: messages(system, user),
       // Strict (constrained decoding) is only offered on some models; others get best-effort JSON + our Zod check.
       response_format: { type: "json_schema", json_schema: { name: "codeguard_output", strict: reasoning, schema } },
     },
     signal,
   );
-  return body.choices?.[0]?.message?.content ?? "";
 };
+
+const callOpenRouter: Call = (model, system, user, schema, signal) =>
+  chatCompletion(
+    "https://openrouter.ai/api/v1/chat/completions",
+    process.env.OPENROUTER_API_KEY!,
+    {
+      model,
+      temperature: 0.2,
+      // Reasoning tokens count against max_tokens; Student Mode output alone can exceed 8K. (Groq stays at 8K: its TPM limit.)
+      max_tokens: 2 * MAX_OUTPUT_TOKENS,
+      messages: messages(system, user),
+      response_format: { type: "json_schema", json_schema: { name: "codeguard_output", strict: true, schema } },
+      // Default reasoning on free reasoning models can run for minutes and eat the output budget.
+      // With require_parameters, a model that doesn't support `reasoning` has no endpoints: it 404s and the cascade moves on.
+      reasoning: { effort: "low", exclude: true },
+      provider: {
+        require_parameters: true, // only route to endpoints that actually honour response_format
+        ...(process.env.OPENROUTER_ZDR === "true" ? { zdr: true, data_collection: "deny" } : {}),
+      },
+    },
+    signal,
+  );
 
 const callGemini: Call = async (model, system, user, schema, signal) => {
   const body = await post(
@@ -136,10 +175,10 @@ export async function generateStructured<T>(opts: {
       }
       let text: string;
       try {
-        text = await p.call(p.model, opts.system, user, schema, AbortSignal.timeout(remaining));
+        text = await p.call(p.model, opts.system, user, schema, AbortSignal.timeout(Math.min(remaining, PER_CALL_TIMEOUT_MS)));
       } catch (e) {
         errors.push(`${label}: ${e instanceof Error ? e.message : String(e)}`);
-        // Network blips ("fetch failed") are as transient as a 503; a timeout means the deadline is spent.
+        // Network blips ("fetch failed") are as transient as a 503; a stalled call already used its 30 s, so move on.
         const transient = e instanceof HttpError ? TRANSIENT.has(e.status) : !(e instanceof Error && /Timeout|Abort/.test(e.name));
         const wait = Math.min(MAX_BACKOFF_MS, (e instanceof HttpError && e.retryAfterMs) || BACKOFF_MS);
         if (transient && backoffs-- > 0 && deadline - Date.now() > wait + 5000) {

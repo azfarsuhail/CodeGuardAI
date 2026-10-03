@@ -15,8 +15,9 @@ import {
   type ScoreReport,
 } from "./schemas.ts";
 
-// Leaves headroom inside the route's maxDuration for the merge and the database write.
-export const AI_DEADLINE_MS = 60_000;
+// Leaves headroom inside the route's 90 s maxDuration for the merge and the database write.
+// Each provider attempt is capped at 30 s, so this always leaves room for at least two tiers.
+export const AI_DEADLINE_MS = 75_000;
 
 export const STATIC_ONLY_NOTICE = "The AI reviewer is unavailable right now, so this report shows static-analysis results only.";
 
@@ -37,6 +38,38 @@ export function staticReview(req: CreateReviewRequest): ReviewResult & { analysi
   const analysis = runStaticAnalysis(req.code, req.language, lintFileName(req.file_name, req.language));
   const findings = mergeFindings({ code: analysis.code, fileName: req.file_name, mode: req.mode, staticFindings: analysis.findings, ai: null });
   return { analysis, findings, scores: computeScores(findings), metrics: mergeMetrics(analysis.metrics, null) };
+}
+
+/**
+ * FR-053: re-run parse + static analysis on a fixed version and list anything it introduced.
+ * Issues are matched by category and line text, so line shifts don't count as new, and neither does the same
+ * issue reported by a different tool (e.g. Ruff's SQL rule goes quiet when a file stops parsing).
+ */
+export function validateFixedCode(original: string, fixed: string, language: CreateReviewRequest["language"], fileName: string) {
+  const name = lintFileName(fileName, language);
+  const key = (f: { category: string; rule: string; start_line: number }, lines: string[]) =>
+    `${f.rule === "syntax-error" ? "syntax" : f.category}|${(lines[f.start_line - 1] ?? "").replace(/\s+/g, " ").trim()}`;
+  const before = runStaticAnalysis(original, language, name);
+  const after = runStaticAnalysis(fixed, language, name);
+  const beforeLines = before.code.split("\n");
+  const afterLines = after.code.split("\n");
+  const remaining = new Map<string, number>();
+  for (const f of before.findings) remaining.set(key(f, beforeLines), (remaining.get(key(f, beforeLines)) ?? 0) + 1);
+
+  const introduced = after.findings.filter((f) => {
+    if (f.tool === "metrics") return false; // size/complexity drift isn't a defect the fix introduced
+    const k = key(f, afterLines);
+    const left = remaining.get(k) ?? 0;
+    if (left > 0) {
+      remaining.set(k, left - 1);
+      return false;
+    }
+    return true;
+  });
+  return {
+    validated: introduced.length === 0,
+    errors: introduced.map((f) => `Line ${f.start_line}: ${f.message} (${f.tool} ${f.rule})`),
+  };
 }
 
 /** Stage 2: AI review grounded in the stage-1 evidence, then merge + scoring. Never throws for LLM failures. */
@@ -69,7 +102,14 @@ export async function aiReview(
     // Graceful degradation (PRD 9): static findings still make a complete, scored report.
     console.error("[pipeline] AI review unavailable:", e instanceof Error ? e.message : e);
   }
-  const findings = mergeFindings({ code: analysis.code, fileName: req.file_name, mode: req.mode, staticFindings: analysis.findings, ai });
+  const findings = mergeFindings({
+    code: analysis.code,
+    fileName: req.file_name,
+    mode: req.mode,
+    staticFindings: analysis.findings,
+    ai,
+    functions: analysis.metrics.functions,
+  });
   return {
     findings,
     scores: computeScores(findings),

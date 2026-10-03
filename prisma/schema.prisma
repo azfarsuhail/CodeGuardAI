@@ -141,6 +141,7 @@ model Finding {
   why                String          @db.Text
   fix                String          @db.Text
   fixCode            String?         @db.Text
+  fixImports         String[]        @default([]) // imports fixCode needs, added once at the top when applied
   fixSafety          FixSafety
   source             FindingSource
   confidence         Float

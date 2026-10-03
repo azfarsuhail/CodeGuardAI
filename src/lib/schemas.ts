@@ -91,6 +91,10 @@ export const AiFinding = z.object({
   why: z.string().max(600).describe("Why it is a problem"),
   fix: z.string().max(600).describe("What to change"),
   fix_code: z.string().max(4000).nullable().describe("Replacement code for start_line..end_line, or null"),
+  fix_imports: z
+    .array(z.string().max(200))
+    .max(5)
+    .describe('Import statements fix_code needs that the file does not have yet, e.g. "import os". Empty array if none'),
   fix_safety: FixSafety,
   confidence: z.number().min(0).max(1),
   cwe: z.string().max(80).nullable().describe('e.g. "CWE-89", or null'), // normalised server-side
@@ -171,6 +175,7 @@ export const Finding = z.object({
   why: z.string(),
   fix: z.string(),
   fix_code: z.string().nullable(),
+  fix_imports: z.array(z.string()),
   fix_safety: FixSafety,
   source: FindingSource,
   confidence: z.number().min(0).max(1),
@@ -206,6 +211,36 @@ export const ReviewMetrics = StaticMetrics.extend({
 
 export const ReviewStatus = z.enum(["queued", "analyzing", "completed", "failed"]);
 
+export const AppliedChange = z.object({
+  finding_ref: z.string(),
+  title: z.string(),
+  safety: FixSafety,
+  start_line: z.int(),
+  end_line: z.int(),
+});
+
+// A saved, re-validated fixed copy of the file (FR-051, FR-053). The original is never modified.
+export const FixVersionDetail = z.object({
+  id: z.string(),
+  type: z.enum(["improve", "fix_safe"]),
+  code: z.string(),
+  changes: z.array(AppliedChange),
+  validated: z.boolean().describe("Parses and introduces no new static-analysis issues"),
+  validation_errors: z.array(z.string()),
+  created_at: z.string(),
+});
+
+// POST /api/reviews/{id}/fix. Omit finding_ids for "Fix All Safe Issues"; needs-review fixes must be listed explicitly.
+export const CreateFixRequest = z.object({
+  finding_ids: z.array(z.string().max(20)).min(1).max(100).optional(),
+});
+
+// PATCH /api/reviews/{id}/findings/{ref}
+export const UpdateFindingRequest = z.object({
+  status: z.enum(["open", "ignored", "false_positive"]),
+  feedback: z.string().trim().max(1000).optional(),
+});
+
 // GET /api/reviews/{id} response.
 export const ReviewDetail = z.object({
   id: z.string(),
@@ -221,6 +256,7 @@ export const ReviewDetail = z.object({
   metrics: ReviewMetrics.nullable(),
   findings: z.array(Finding),
   concept_primers: z.array(ConceptPrimer),
+  fix_versions: z.array(FixVersionDetail).describe("Newest first"),
   static_only: z.boolean(),
   notice: z.string().nullable(),
   model: z.string().nullable(),
@@ -254,6 +290,9 @@ export type FunctionMetric = z.infer<typeof FunctionMetric>;
 export type ReviewMetrics = z.infer<typeof ReviewMetrics>;
 export type ReviewStatus = z.infer<typeof ReviewStatus>;
 export type ReviewDetail = z.infer<typeof ReviewDetail>;
+export type FixVersionDetail = z.infer<typeof FixVersionDetail>;
+export type CreateFixRequest = z.infer<typeof CreateFixRequest>;
+export type UpdateFindingRequest = z.infer<typeof UpdateFindingRequest>;
 
 // JSON Schemas handed to Gemini (responseJsonSchema) / Groq (response_format.json_schema).
 export const aiReviewJsonSchema = z.toJSONSchema(AiReviewOutput);

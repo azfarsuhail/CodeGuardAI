@@ -201,23 +201,71 @@ try {
 }
 
 // ---------------------------------------------------------------------------
-// 4. Provider fallback, live: break providers in-process and re-run the AI stage.
+// 4. Phase 4 endpoints: Fix All Safe Issues and false-positive feedback.
+// ---------------------------------------------------------------------------
+{
+  const fixRes = await fetch(`${BASE}/api/reviews/${id}/fix`, { method: "POST" });
+  const version = await fixRes.json();
+  const after = ReviewDetail.parse(await (await fetch(`${BASE}/api/reviews/${id}`)).json());
+  await check(`Fix All Safe Issues creates a new version (${fixRes.status}, validated=${version.validated})`, () => {
+    assert.equal(fixRes.status, 201, JSON.stringify(version));
+    assert.notEqual(version.code, detail.original_code);
+    assert.ok(version.changes.length > 0 && version.changes.every((c: { safety: string }) => c.safety === "safe"));
+    if (!version.validated) console.log(`  (validation flagged: ${version.validation_errors.join("; ")})`);
+  });
+  await check("original code is unchanged after fixing, and the version is listed", () => {
+    assert.equal(after.original_code, detail.original_code);
+    assert.equal(after.fix_versions[0]?.id, version.id);
+  });
+  const optIn = f.find((x) => x.fix_safety === "needs_review" && x.fix_code);
+  if (optIn) {
+    const res = await fetch(`${BASE}/api/reviews/${id}/fix`, { method: "POST", body: JSON.stringify({ finding_ids: [optIn.id] }) });
+    const v = await res.json();
+    await check("needs-review fix applies only when explicitly listed", () => {
+      assert.equal(res.status, 201);
+      assert.deepEqual(v.changes.map((c: { finding_ref: string }) => c.finding_ref), [optIn.id]);
+    });
+  }
+
+  const target = f.find((x) => x.category === "security")!;
+  const flag = async (status: string) =>
+    (await fetch(`${BASE}/api/reviews/${id}/findings/${target.id}`, { method: "PATCH", body: JSON.stringify({ status }) })).json();
+  const flagged = await flag("false_positive");
+  const reopened = await flag("open");
+  await check("marking a false positive rescores (security rises), undo restores it", () => {
+    assert.ok(flagged.scores.security > detail.scores!.security, `${flagged.scores.security} vs ${detail.scores!.security}`);
+    assert.equal(reopened.scores.security, detail.scores!.security);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 5. Provider cascade, live: break providers in-process and re-run the AI stage.
 // ---------------------------------------------------------------------------
 const req = CreateReviewRequest.parse({ code: CODE, language: "python", mode: "developer", file_name: "duplicates.py" });
 const { analysis } = staticReview(req);
-const realGroq = process.env.GROQ_API_KEY;
-const realGemini = process.env.GEMINI_API_KEY;
+const real = { openrouter: process.env.OPENROUTER_API_KEY, groq: process.env.GROQ_API_KEY, gemini: process.env.GEMINI_API_KEY };
+const BROKEN = "invalid-key-for-fallback-test";
 const silence = console.error;
+const silenceWarn = console.warn;
 const providerErrors: string[] = [];
 console.error = (...args: unknown[]) => providerErrors.push(args.map(String).join(" ")); // expected; shown on failure
+console.warn = console.error;
 try {
-  process.env.GROQ_API_KEY = "invalid-key-for-fallback-test";
-  const fallback = await aiReview(req, analysis, 45_000);
-  await check(`Groq rejected -> Gemini fallback produces the AI review (${fallback.model ?? "none"})`, () =>
-    assert.match(fallback.model ?? "none", /^gemini:/),
-  );
+  if (real.openrouter) {
+    process.env.OPENROUTER_API_KEY = BROKEN;
+    const tier2 = await aiReview(req, analysis, 45_000);
+    await check(`OpenRouter rejected -> tier 2 Groq serves the review (${tier2.model ?? "none"})`, () => assert.match(tier2.model ?? "none", /^groq:/));
+  }
+  if (real.gemini) {
+    process.env.OPENROUTER_API_KEY = BROKEN;
+    process.env.GROQ_API_KEY = BROKEN;
+    const tier3 = await aiReview(req, analysis, 45_000);
+    await check(`OpenRouter and Groq rejected -> tier 3 Gemini serves the review (${tier3.model ?? "none"})`, () =>
+      assert.match(tier3.model ?? "none", /^gemini:/),
+    );
+  }
 
-  process.env.GEMINI_API_KEY = "invalid-key-for-fallback-test";
+  for (const k of ["OPENROUTER_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY"]) if (process.env[k]) process.env[k] = BROKEN;
   const degraded = await aiReview(req, analysis, 20_000);
   await check("both providers down -> static-only report with notice, still scored", () => {
     assert.equal(degraded.model, null);
@@ -226,9 +274,11 @@ try {
     assert.ok(degraded.scores.overall < 100);
   });
 } finally {
-  process.env.GROQ_API_KEY = realGroq;
-  process.env.GEMINI_API_KEY = realGemini;
+  process.env.OPENROUTER_API_KEY = real.openrouter;
+  process.env.GROQ_API_KEY = real.groq;
+  process.env.GEMINI_API_KEY = real.gemini;
   console.error = silence;
+  console.warn = silenceWarn;
 }
 
 // ---------------------------------------------------------------------------

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { runStaticAnalysis } from "../analysis/index.ts";
 import { LANGUAGES } from "../languages.ts";
 import { AiReviewOutput, type AiFinding } from "../schemas.ts";
-import { mergeFindings, mergeMetrics, verifyLocation } from "./merge.ts";
+import { absorbEchoedContext, clampToFunction, mergeFindings, mergeMetrics, orphansNextLine, reindentFix, verifyLocation } from "./merge.ts";
 import { buildReviewPrompt } from "./prompt.ts";
 
 const code = LANGUAGES.python.sample;
@@ -13,7 +13,7 @@ const sqlRef = analysis.findings.find((f) => f.cwe === "CWE-89")!.id;
 const ai = (over: Partial<AiFinding>): AiFinding => ({
   id: "F-0001", static_ref: null, category: "bug", severity: "high", title: "t",
   location: { start_line: 13, end_line: 13 }, evidence: "return total / len(scores)",
-  problem: "p", why: "w", fix: "f", fix_code: null, fix_safety: "safe", confidence: 0.9,
+  problem: "p", why: "w", fix: "f", fix_code: null, fix_imports: [], fix_safety: "safe", confidence: 0.9,
   cwe: null, owasp: null, student_explanation: "simple words", ...over,
 });
 const output = (findings: AiFinding[]) =>
@@ -51,6 +51,54 @@ test("AI findings become Verified when tied to evidence; hallucinations and doub
   // Remaining analyzer evidence is still reported as static-only.
   assert.ok(merged.some((f) => f.source === "static" && f.cwe === "CWE-798"));
   assert.ok(merged.every((f, i) => f.id === `F-${String(i + 1).padStart(4, "0")}`));
+});
+
+test("AI ranges that run past their function are clamped so fixes can't eat the next function", () => {
+  const fns = analysis.metrics.functions; // average 9-13, has_duplicates 15-20
+  assert.deepEqual(clampToFunction({ start: 13, end: 17 }, fns), { start: 13, end: 13 });
+  assert.deepEqual(clampToFunction({ start: 17, end: 21 }, fns), { start: 17, end: 20 });
+  assert.deepEqual(clampToFunction({ start: 1, end: 8 }, fns), { start: 1, end: 4 }); // top level, stops before get_user
+  const [f] = mergeFindings({
+    code: analysis.code, fileName: "main.py", mode: "developer", staticFindings: [], functions: fns,
+    ai: output([ai({ location: { start_line: 13, end_line: 17 } })]),
+  });
+  assert.deepEqual([f.location.start_line, f.location.end_line], [13, 13]);
+});
+
+test("fix code that echoes the lines around its range absorbs them instead of duplicating them", () => {
+  const lines = analysis.code.split("\n"); // average(): 10 total = 0, 11 for s in scores:, 12 total += s, 13 return ...
+  const echo = "    total = 0\n    for s in scores:\n        total += s\n    if not scores:\n        return 0\n    return total / len(scores)";
+  assert.deepEqual(absorbEchoedContext(lines, { start: 13, end: 13 }, echo), { start: 10, end: 13 });
+  assert.deepEqual(absorbEchoedContext(lines, { start: 13, end: 13 }, "    if not scores:\n        return 0\n    return total / len(scores)"), { start: 13, end: 13 });
+  // Applying the absorbed range yields one loop, not two.
+  const [f] = mergeFindings({
+    code: analysis.code, fileName: "main.py", mode: "developer", staticFindings: [], functions: analysis.metrics.functions,
+    ai: output([ai({ fix_code: echo })]),
+  });
+  assert.deepEqual([f.location.start_line, f.location.end_line], [10, 13]);
+});
+
+test("an under-indented fix is shifted to the indentation of the code it replaces", () => {
+  const lines = analysis.code.split("\n"); // line 13: "    return total / len(scores)"
+  const flat = "if not scores:\n    return 0\nreturn total / len(scores)";
+  assert.equal(reindentFix(lines, { start: 13, end: 13 }, flat), "    if not scores:\n        return 0\n    return total / len(scores)");
+  const correct = "    if not scores:\n        return 0\n    return total / len(scores)";
+  assert.equal(reindentFix(lines, { start: 13, end: 13 }, correct), correct);
+  const [f] = mergeFindings({ code: analysis.code, fileName: "main.py", mode: "developer", staticFindings: [], ai: output([ai({ fix_code: flat })]) });
+  assert.equal(f.fix_code, correct);
+});
+
+test("a 'safe' fix that would leave unreachable code is demoted to needs_review", () => {
+  const lines = analysis.code.split("\n"); // line 6: query = ..., line 7: return conn.execute(query).fetchone()
+  const sqlFix = '    query = "SELECT * FROM users WHERE name = ?"\n    return conn.execute(query, (username,)).fetchone()';
+  assert.equal(orphansNextLine(lines, { start: 6, end: 6 }, sqlFix), true);
+  assert.equal(orphansNextLine(lines, { start: 6, end: 7 }, sqlFix), false); // range covers the old return
+  assert.equal(orphansNextLine(lines, { start: 6, end: 6 }, '    query = "SELECT * FROM users WHERE name = ?"'), false);
+  const [f] = mergeFindings({
+    code: analysis.code, fileName: "main.py", mode: "developer", staticFindings: [],
+    ai: output([ai({ category: "security", location: { start_line: 6, end_line: 6 }, evidence: "query = ", fix_code: sqlFix })]),
+  });
+  assert.equal(f.fix_safety, "needs_review");
 });
 
 test("algorithm-level fixes can't be marked safe for one-click apply", () => {

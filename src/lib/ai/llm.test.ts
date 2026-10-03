@@ -22,11 +22,15 @@ const geminiReply = (text: string) => () => Response.json({ candidates: [{ finis
 
 beforeEach(() => {
   calls = [];
+  delete process.env.OPENROUTER_API_KEY;
+  delete process.env.OPENROUTER_ZDR;
   process.env.GROQ_API_KEY = "test-groq";
   process.env.GEMINI_API_KEY = "test-gemini";
 });
 afterEach(() => {
   globalThis.fetch = realFetch;
+  delete process.env.OPENROUTER_API_KEY;
+  delete process.env.OPENROUTER_ZDR;
   delete process.env.GROQ_API_KEY;
   delete process.env.GEMINI_API_KEY;
 });
@@ -90,6 +94,34 @@ test("everything failing raises LlmUnavailableError", async () => {
   mockFetch({ "api.groq.com": [down], "generativelanguage.googleapis.com": [down, down] });
   await assert.rejects(run(), LlmUnavailableError);
   assert.equal(calls.length, 3);
+});
+
+test("3-tier cascade: OpenRouter first, then Groq, then Gemini", async () => {
+  process.env.OPENROUTER_API_KEY = "test-openrouter";
+  mockFetch({ "openrouter.ai": [groqReply('{"answer":"or"}')] });
+  assert.equal((await run()).model, "openrouter:nvidia/nemotron-3-super-120b-a12b:free");
+
+  calls = [];
+  mockFetch({
+    "openrouter.ai": [() => Response.json({ error: { code: 400, message: "Provider returned error" } })], // 200 with error body
+    "api.groq.com": [() => new Response("Invalid API Key", { status: 401 })],
+    "generativelanguage.googleapis.com": [geminiReply('{"answer":"gem"}')],
+  });
+  assert.equal((await run()).model, "gemini:gemini-3.6-flash");
+  assert.deepEqual(calls, ["openrouter.ai", "api.groq.com", "generativelanguage.googleapis.com"]);
+});
+
+test("OpenRouter requests require response_format support and honour OPENROUTER_ZDR", async () => {
+  process.env.OPENROUTER_API_KEY = "test-openrouter";
+  process.env.OPENROUTER_ZDR = "true";
+  let sent: Record<string, unknown> = {};
+  globalThis.fetch = (async (_url: string, init: RequestInit) => {
+    sent = JSON.parse(String(init.body));
+    return groqReply('{"answer":"ok"}')();
+  }) as typeof fetch;
+  await run();
+  assert.deepEqual(sent.provider, { require_parameters: true, zdr: true, data_collection: "deny" });
+  assert.equal((sent.response_format as { type: string }).type, "json_schema");
 });
 
 test("no provider configured is reported as unavailable", async () => {

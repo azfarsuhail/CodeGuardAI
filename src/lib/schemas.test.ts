@@ -22,7 +22,7 @@ test("LLM review output validates and rejects malformed findings", () => {
     location: { start_line: 2, end_line: 2 }, evidence: "    return a / b",
     problem: "b may be zero.", why: "Raises ZeroDivisionError.", fix: "Guard b == 0.",
     fix_code: "    if b == 0:\n        raise ValueError('b must be non-zero')\n    return a / b",
-    fix_safety: "safe", confidence: 0.9, cwe: "CWE-369", owasp: null,
+    fix_imports: [], fix_safety: "safe", confidence: 0.9, cwe: "CWE-369", owasp: null,
     student_explanation: "Dividing by zero is undefined, so Python stops your program.",
   };
   const output = { summary: "One bug.", findings: [finding], complexity: { time_complexity: "O(1)", space_complexity: "O(1)", functions: [] }, concept_primers: [] };

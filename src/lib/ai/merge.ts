@@ -7,6 +7,7 @@ import type {
   ReviewMetrics,
   ReviewMode,
   StaticFinding,
+  StaticFunctionMetric,
   StaticMetrics,
 } from "../schemas.ts";
 
@@ -43,6 +44,61 @@ const atLeast = (safety: FixSafety, category: FindingCategory) => {
   return floor && SAFETY_RANK[floor] > SAFETY_RANK[safety] ? floor : safety;
 };
 
+/**
+ * Models often echo surrounding lines in fix_code (e.g. repeat the loop above the line they fix). If the fix
+ * starts with an exact copy of the lines just above the range, or ends with the lines just below, it means to
+ * replace them too, so extend the range. Nothing is lost: those lines reappear verbatim in the fix.
+ */
+export function absorbEchoedContext(lines: string[], loc: { start: number; end: number }, fixCode: string) {
+  const fix = fixCode.replace(/\s+$/, "").split("\n").map((l) => l.trim());
+  const orig = (n: number) => (lines[n - 1] ?? "").trim(); // 1-based
+  const matches = (fixFrom: number, origFrom: number, k: number) =>
+    Array.from({ length: k }, (_, j) => fix[fixFrom + j] === orig(origFrom + j)).every(Boolean) &&
+    Array.from({ length: k }, (_, j) => orig(origFrom + j)).some(Boolean); // not just blank lines
+  let { start, end } = loc;
+  for (let k = Math.min(fix.length - 1, start - 1); k > 0; k--)
+    if (matches(0, start - k, k)) {
+      start -= k;
+      break;
+    }
+  for (let k = Math.min(fix.length - 1, lines.length - end); k > 0; k--)
+    if (matches(fix.length - k, end + 1, k)) {
+      end += k;
+      break;
+    }
+  return { start, end };
+}
+
+/**
+ * Models sometimes return fix_code without the surrounding indentation (a guard inside a function at column 0),
+ * which breaks indentation-sensitive code. Shift an under-indented fix to the indentation of the line it replaces.
+ */
+export function reindentFix(lines: string[], loc: { start: number; end: number }, fixCode: string) {
+  const fix = fixCode.split("\n");
+  const indentOf = (s: string) => /^[ \t]*/.exec(s)![0];
+  const target = indentOf(lines[loc.start - 1] ?? "");
+  const code = fix.filter((l) => l.trim());
+  if (!code.length) return fixCode;
+  const min = Math.min(...code.map((l) => indentOf(l).length));
+  const shift = target.length - min;
+  if (shift <= 0) return fixCode;
+  const pad = (target[0] === "\t" ? "\t" : " ").repeat(shift);
+  return fix.map((l) => (l.trim() ? pad + l : l)).join("\n");
+}
+
+/**
+ * A replacement that ends by leaving the block (return/raise/throw/...) while the original has more code
+ * right after the replaced range would orphan that code. Such fixes need a human look, never bulk-apply.
+ */
+export function orphansNextLine(lines: string[], loc: { start: number; end: number }, fixCode: string) {
+  const last = fixCode.replace(/\s+$/, "").split("\n").pop() ?? "";
+  if (!/^\s*(return|raise|throw|break|continue)\b/.test(last)) return false;
+  const next = lines[loc.end]; // line after the range (0-based index = end)
+  if (!next?.trim()) return false;
+  const indent = (s: string) => s.length - s.trimStart().length;
+  return indent(next) >= indent(last) && !/^\s*[})\]]/.test(next) && !/^\s*(else|elif|except|finally|case|default)\b/.test(next);
+}
+
 const normalize = (s: string) => s.replace(/\s+/g, " ").trim();
 const normalizeCwe = (cwe: string | null) => {
   const m = cwe && /CWE[-\s]?(\d+)/i.exec(cwe);
@@ -67,6 +123,20 @@ export function verifyLocation(lines: string[], start: number, end: number, evid
   return best === -1 ? null : { start: best, end: Math.min(best + span, lines.length) };
 }
 
+/**
+ * Models are good at the first line of an issue and sloppy with the last. Fixes replace exactly
+ * start..end, so a range that runs past its function would delete the next one. Clamp it.
+ */
+export function clampToFunction(loc: { start: number; end: number }, functions: StaticFunctionMetric[]) {
+  const owner = functions
+    .filter((f) => f.start_line <= loc.start && loc.start <= f.end_line)
+    .sort((a, b) => a.end_line - a.start_line - (b.end_line - b.start_line))[0];
+  if (owner) return { start: loc.start, end: Math.min(loc.end, owner.end_line) };
+  // Top-level code: stop before the next function begins.
+  const next = functions.filter((f) => f.start_line > loc.start && f.start_line <= loc.end).sort((a, b) => a.start_line - b.start_line)[0];
+  return next ? { start: loc.start, end: Math.max(loc.start, next.start_line - 1) } : loc;
+}
+
 function fromStatic(s: StaticFinding, file: string): Omit<Finding, "id"> {
   return {
     category: s.category,
@@ -77,6 +147,7 @@ function fromStatic(s: StaticFinding, file: string): Omit<Finding, "id"> {
     why: WHY_BY_CATEGORY[s.category],
     fix: s.fix_hint ?? `Resolve the ${s.tool} \`${s.rule}\` issue reported on this line.`,
     fix_code: null,
+    fix_imports: [],
     fix_safety: s.fix_safety,
     source: "static",
     confidence: STATIC_CONFIDENCE,
@@ -94,6 +165,8 @@ export function mergeFindings(args: {
   mode: ReviewMode;
   staticFindings: StaticFinding[];
   ai: AiReviewOutput | null;
+  /** Analyzer function spans, used to keep AI-cited ranges inside one function. */
+  functions?: StaticFunctionMetric[];
 }): Finding[] {
   const lines = args.code.split("\n");
   const byId = new Map(args.staticFindings.map((s) => [s.id, s]));
@@ -110,6 +183,7 @@ export function mergeFindings(args: {
       if (a.confidence < MIN_AI_CONFIDENCE) continue;
       loc = verifyLocation(lines, a.location.start_line, a.location.end_line, a.evidence);
       if (!loc) continue; // hallucinated or mis-quoted location
+      loc = clampToFunction(loc, args.functions ?? []);
       const at = loc;
       // The model found something an analyzer also flagged but didn't cite it: still counts as Verified.
       ref = args.staticFindings.find(
@@ -118,6 +192,11 @@ export function mergeFindings(args: {
     }
     if (ref) used.add(ref.id);
     const cwe = normalizeCwe(a.cwe) ?? ref?.cwe ?? null;
+    let fixCode = a.fix_code?.trim() ? a.fix_code : null;
+    if (fixCode && !ref) loc = absorbEchoedContext(lines, loc, fixCode);
+    if (fixCode) fixCode = reindentFix(lines, loc, fixCode);
+    let safety = atLeast(a.fix_safety, a.category);
+    if (safety === "safe" && fixCode && orphansNextLine(lines, loc, fixCode)) safety = "needs_review";
     merged.push({
       category: a.category,
       severity: a.severity,
@@ -126,8 +205,9 @@ export function mergeFindings(args: {
       problem: a.problem,
       why: a.why,
       fix: a.fix,
-      fix_code: a.fix_code?.trim() ? a.fix_code : null,
-      fix_safety: atLeast(a.fix_safety, a.category),
+      fix_code: fixCode,
+      fix_imports: fixCode ? a.fix_imports.map((i) => i.trim()).filter(Boolean) : [],
+      fix_safety: safety,
       source: ref ? "both" : "ai",
       confidence: ref ? Math.max(a.confidence, MIN_CONFIRMED_CONFIDENCE) : a.confidence,
       cwe,

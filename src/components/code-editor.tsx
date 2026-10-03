@@ -5,9 +5,9 @@ import Editor, { type BeforeMount, type OnMount } from "@monaco-editor/react";
 import { mono } from "@/app/fonts";
 import type { Language } from "@/lib/schemas";
 
-const THEME = "codeguard-ink";
+export const THEME = "codeguard-ink";
 
-const defineTheme: BeforeMount = (monaco) => {
+export const defineTheme: BeforeMount = (monaco) => {
   monaco.editor.defineTheme(THEME, {
     base: "vs-dark",
     inherit: true,
@@ -31,6 +31,11 @@ const defineTheme: BeforeMount = (monaco) => {
       "editorIndentGuide.background1": "#26384D",
       "editorWhitespace.foreground": "#26384D",
       "editor.placeholder.foreground": "#7F93A8",
+      "diffEditor.insertedTextBackground": "#3FB95040",
+      "diffEditor.insertedLineBackground": "#3FB9501F",
+      "diffEditor.removedTextBackground": "#F8514952",
+      "diffEditor.removedLineBackground": "#F851491F",
+      "diffEditor.diagonalFill": "#26384D",
     },
   });
 };
